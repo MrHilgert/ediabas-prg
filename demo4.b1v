@@ -1,0 +1,436 @@
+
+#DLINE 0 "DEMO4.B2V"
+
+
+INITIALISIERUNG#
+#DLINE 106 "DEMO4.B2V"
+#DLINE 107 "DEMO4.B2V"
+            xconnect
+            push        #1.L
+		pop 		L1					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 108 "DEMO4.B2V"
+		move		L0,#$2				; 
+		push		L0					; 
+            xreps       #$2
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 109 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,{$1.I,$2580.I,$aa.I,$0.I,$0.I,$7d0.I,$1f4.I}				; PARAMETER
+		push		#1.L					; TRUE
+            xsetpar     {$1.I,$2580.I,$aa.I,$0.I,$0.I,$7d0.I,$1f4.I}
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 110 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,{$fffffffe.I,$0.I}				; AWLEN
+		push		#1.L					; TRUE
+            xawlen      {$fffffffe.I,$0.I}
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 111 "DEMO4.B2V"
+		move		L0,#$1				; 
+		push		L0					; 
+		atsp		L0,#4				; 
+		ergi		"DONE",I0
+		pop 		L0					; cleanup stack
+#DLINE 112 "DEMO4.B2V"
+		eoj							; 
+		eoj							; 
+
+
+ENDE#
+#DLINE 122 "DEMO4.B2V"
+#DVARB antwort S2 0 0
+#DLINE 125 "DEMO4.B2V"
+            xconnect
+            push        #1.L
+		pop 		L1					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 126 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S2			;antwort
+		push		#1.L					; TRUE
+		clear		S1					; 
+		move		S1,{$aa.B,$0.B,$4.B,$f.B}				; TEL_END_DIAG
+		push		#1.L					; TRUE
+            clear       S2
+            xsend       S2,{$aa.B,$0.B,$4.B,$f.B}
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 127 "DEMO4.B2V"
+#DVARE antwort
+		eoj							; 
+		eoj							; 
+
+
+READ_IDENT#
+#DLINE 142 "DEMO4.B2V"
+#DVARB antwort S2 0 0
+#DVARB idString S3 0 0
+#DVARB verString S4 0 0
+#DLINE 147 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,"*****"				; 
+		push		#1.L					; TRUE
+		ergs		"IDENT_STRING",S1
+		pop 		L0					; cleanup stack
+#DLINE 148 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,"*****"				; 
+		push		#1.L					; TRUE
+		ergs		"IDENT_VERSION",S1
+		pop 		L0					; cleanup stack
+#DLINE 150 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S2			;antwort
+		push		#1.L					; TRUE
+		clear		S1					; 
+		move		S1,{$aa.B,$0.B,$4.B,$1.B}				; TEL_ID_READ
+		push		#1.L					; TRUE
+            clear       S2
+            xsend       S2,{$aa.B,$0.B,$4.B,$1.B}
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 153 "DEMO4.B2V"
+		move		L0,#$3				; CTRLPOS
+		push		L0					; 
+		atsp		L1,#4				; 
+		clear		S1				;clear indexed register
+		move		S1,S2			;antwort
+		clear		L0					; 
+		move		B0,S1[L1]
+		push		L0					; 
+		pop 		L0					; 
+		pop 		L1					; 
+		push		L0					; 
+		move		L0,#$3				; CTRLPOS
+		push		L0					; 
+		atsp		L1,#4				; 
+		clear		S1					; 
+		move		S1,{$aa.B,$0.B,$4.B,$1.B}				; TEL_ID_READ
+		clear		L0					; 
+		move		B0,S1[L1]
+		jpl 		__B2_HD_00008					; positiv
+		move		I1,#$FFFF				; SIGN EXTEND
+		move		B1,#$FF				; SIGN EXTEND
+__B2_HD_00008:
+		push		L0					; 
+		pop 		L0					; 
+		pop 		L1					; 
+		push		L0					; 
+		pop 		L1					; 
+		pop 		L0					; 
+		comp		L0,L1				; 
+		jz  		__B2_HD_00009					; if condition true then true
+		push		#0.L					; FALSE
+		jump		__B2_HD_00010					; 
+__B2_HD_00009:
+		push		#1.L					; TRUE
+__B2_HD_00010:
+		move		L0,#$80				; CTRLOR
+		push		L0					; 
+		pop 		L1					; 
+		pop 		L0					; 
+		or  		L0,L1				; 
+		push		L0					; 
+		pop 		L0					; get expression
+		jz  		__B2_HD_00011					; IF
+		nop 							; for debugging
+#DLINE 156 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S3			;idString
+		push		#1.L					; TRUE
+		clear		S1					; 
+		move		S1,S2			;antwort
+		push		#1.L					; TRUE
+		move		L0,#$4				; 
+		push		L0					; 
+		move		L0,#$d				; 
+		push		L0					; 
+            move    s1,S2
+            move    l0,#$4
+            move    l1,#$d
+            move    S3,s1[l0]l1
+            slen    l0,S3
+            push    l0
+		pop 		L1					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 157 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S3			;idString
+		push		#1.L					; TRUE
+            clear       s1              ;strrevers
+            move        s1,""
+            strcat      s1,S3
+            scut        s1,#1
+            srevrs      s1
+            scat        s1,""
+            move        S3,s1
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 158 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S3			;idString
+		push		#1.L					; TRUE
+		ergs		"IDENT_STRING",S1
+		pop 		L0					; cleanup stack
+#DLINE 161 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S3			;idString
+		push		#1.L					; TRUE
+            clear       S3
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 162 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S4			;verString
+		push		#1.L					; TRUE
+		clear		S1					; 
+		move		S1,S2			;antwort
+		push		#1.L					; TRUE
+		move		L0,#$11				; 
+		push		L0					; 
+		move		L0,#$1				; 
+		push		L0					; 
+            move        s1,S2          ; source
+            move        l0,#$11          ; l0 is position
+            move        l1,#$1          ; l1 is count
+            clear       S4
+            y2bcd       S4,s1[l0]l1
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 163 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S3			;idString
+		push		#1.L					; TRUE
+		clear		S1					; 
+		move		S1,S4			;verString
+		push		#1.L					; TRUE
+            clear       S3             ;strcpy
+            strcat      S3,S4
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 164 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S3			;idString
+		push		#1.L					; TRUE
+		clear		S1					; 
+		move		S1,"."				; 
+		push		#1.L					; TRUE
+            strcat      S3,"."        ;strcat
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 165 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S4			;verString
+		push		#1.L					; TRUE
+		clear		S1					; 
+		move		S1,S2			;antwort
+		push		#1.L					; TRUE
+		move		L0,#$12				; 
+		push		L0					; 
+		move		L0,#$1				; 
+		push		L0					; 
+            move        s1,S2          ; source
+            move        l0,#$12          ; l0 is position
+            move        l1,#$1          ; l1 is count
+            clear       S4
+            y2bcd       S4,s1[l0]l1
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 166 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S3			;idString
+		push		#1.L					; TRUE
+		clear		S1					; 
+		move		S1,S4			;verString
+		push		#1.L					; TRUE
+            strcat      S3,S4        ;strcat
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 167 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S3			;idString
+		push		#1.L					; TRUE
+		ergs		"IDENT_VERSION",S1
+		pop 		L0					; cleanup stack
+#DLINE 168 "DEMO4.B2V"
+__B2_HD_00011:
+#DLINE 169 "DEMO4.B2V"
+#DVARE verString
+#DVARE idString
+#DVARE antwort
+		eoj							; 
+		eoj							; 
+
+
+CLEAR_TC#
+#DLINE 180 "DEMO4.B2V"
+#DVARB antwort S2 0 0
+#DVARB statusText S3 0 0
+#DLINE 185 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,"Fehlerspeicher "				; 
+		push		#1.L					; TRUE
+		clear		S3			;statusText
+		move		S3,S1			;statusText
+		pop 		L0					; cleanup stack
+#DLINE 187 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S2			;antwort
+		push		#1.L					; TRUE
+		clear		S1					; 
+		move		S1,{$aa.B,$0.B,$4.B,$3.B}				; TEL_TC_CLEAR
+		push		#1.L					; TRUE
+            clear       S2
+            xsend       S2,{$aa.B,$0.B,$4.B,$3.B}
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 190 "DEMO4.B2V"
+		move		L0,#$3				; CTRLPOS
+		push		L0					; 
+		atsp		L1,#4				; 
+		clear		S1				;clear indexed register
+		move		S1,S2			;antwort
+		clear		L0					; 
+		move		B0,S1[L1]
+		push		L0					; 
+		pop 		L0					; 
+		pop 		L1					; 
+		push		L0					; 
+		move		L0,#$3				; CTRLPOS
+		push		L0					; 
+		atsp		L1,#4				; 
+		clear		S1					; 
+		move		S1,{$aa.B,$0.B,$4.B,$3.B}				; TEL_TC_CLEAR
+		clear		L0					; 
+		move		B0,S1[L1]
+		jpl 		__B2_HD_00021					; positiv
+		move		I1,#$FFFF				; SIGN EXTEND
+		move		B1,#$FF				; SIGN EXTEND
+__B2_HD_00021:
+		push		L0					; 
+		pop 		L0					; 
+		pop 		L1					; 
+		push		L0					; 
+		move		L0,#$80				; CTRLOR
+		push		L0					; 
+		pop 		L1					; 
+		pop 		L0					; 
+		or  		L0,L1				; 
+		push		L0					; 
+		pop 		L1					; 
+		pop 		L0					; 
+		comp		L0,L1				; 
+		jnz 		__B2_HD_00022					; if condition true then true
+		push		#0.L					; FALSE
+		jump		__B2_HD_00023					; 
+__B2_HD_00022:
+		push		#1.L					; TRUE
+__B2_HD_00023:
+		pop 		L0					; get expression
+		jz  		__B2_HD_00024					; IF
+		nop 							; for debugging
+#DLINE 191 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S3			;statusText
+		push		#1.L					; TRUE
+		clear		S1					; 
+		move		S1,"NICHT "				; 
+		push		#1.L					; TRUE
+            strcat      S3,"NICHT "        ;strcat
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+__B2_HD_00024:
+#DLINE 193 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S3			;statusText
+		push		#1.L					; TRUE
+		clear		S1					; 
+		move		S1,"geloescht"				; 
+		push		#1.L					; TRUE
+            strcat      S3,"geloescht"        ;strcat
+            push        #1.L
+		pop 		L1					; 
+		pop 		L0					; 
+		pop 		L0					; 
+		push		L1					; 
+		pop 		L0					; cleanup stack
+#DLINE 194 "DEMO4.B2V"
+		clear		S1					; 
+		move		S1,S3			;statusText
+		push		#1.L					; TRUE
+		ergs		"STATUS",S1
+		pop 		L0					; cleanup stack
+#DLINE 195 "DEMO4.B2V"
+#DVARE statusText
+#DVARE antwort
+		eoj							; 
+		eoj							; 
+
+
+

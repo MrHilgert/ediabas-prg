@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;-webkit-font-smoothing:antialiased}
+:root,[data-theme="dark"]{--bg:#0f1216;--panel:#171a1f;--panel-2:#1d2128;--elev:#23272f;--stroke:#2a2f38;--stroke-2:#3a414c;--fg:#d7dbe1;--fg-dim:#868d98;--fg-faint:#565c66;--accent:#2f81f7;--accent-fg:#ffffff;--accent-tint:rgba(47,129,247,0.13);--ok:#3fb950;--warn:#d29922;--err:#f85149;--faint-dot:#565c66}
+[data-theme="light"]{--bg:#e7e9ec;--panel:#f5f6f8;--panel-2:#ffffff;--elev:#ffffff;--stroke:#d4d8de;--stroke-2:#bcc3cc;--fg:#1a1e25;--fg-dim:#5b626c;--fg-faint:#8b929c;--accent:#1f6fe5;--accent-fg:#ffffff;--accent-tint:rgba(31,111,229,0.10);--ok:#1a7f37;--warn:#9a6700;--err:#cf222e;--faint-dot:#9aa1ab}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--stroke-2);border-radius:2px}
+::-webkit-scrollbar-track{background:transparent}
+input::placeholder{color:var(--fg-faint)}
+</style>
+</helmet>
+<div data-theme="{{ theme }}" data-screen-label="Chassis Select" style="height:100vh;display:flex;flex-direction:column;background:var(--bg);color:var(--fg)">
+
+  <header style="display:flex;align-items:center;gap:16px;height:48px;padding:0 14px;background:var(--panel);border-bottom:1px solid var(--stroke);flex:none">
+    <div style="width:30px;height:30px;border:1px solid var(--stroke-2);border-radius:3px;display:flex;align-items:center;justify-content:center;color:var(--accent);font-weight:700;font-size:13px">e/</div>
+    <div style="display:flex;flex-direction:column;line-height:1.15">
+      <span style="font-weight:700;font-size:14px;letter-spacing:0.06em;color:var(--fg)">eDIAG</span>
+      <span style="font-size:9px;letter-spacing:0.18em;color:var(--fg-dim)">{{ t.title_sub }}</span>
+    </div>
+    <sc-if value="{{ inEcu }}">
+      <button onClick="{{ goChassis }}" style="display:flex;align-items:center;gap:7px;padding:6px 11px;border:1px solid var(--stroke);border-radius:3px;background:var(--panel-2);color:var(--fg-dim);font-family:inherit;font-size:11px;letter-spacing:0.04em;cursor:pointer" style-hover="box-shadow:inset 0 0 0 999px rgba(127,127,127,0.06)">‹ {{ t.back }}</button>
+      <span style="font-size:11px;color:var(--fg-faint)">/</span>
+      <span style="font-size:11px;color:var(--fg);letter-spacing:0.02em">{{ ctxLabel }}</span>
+    </sc-if>
+    <sc-if value="{{ inSession }}">
+      <button onClick="{{ exitSession }}" style="display:flex;align-items:center;gap:7px;padding:6px 11px;border:1px solid var(--stroke);border-radius:3px;background:var(--panel-2);color:var(--fg-dim);font-family:inherit;font-size:11px;letter-spacing:0.04em;cursor:pointer" style-hover="box-shadow:inset 0 0 0 999px rgba(127,127,127,0.06)">‹ {{ t.back_ecu }}</button>
+      <span style="font-size:11px;color:var(--fg-faint)">/</span>
+      <span style="font-size:11px;color:var(--fg);letter-spacing:0.02em">{{ sesCtx }}</span>
+    </sc-if>
+    <span style="flex:1"></span>
+    <div style="display:flex;align-items:center;gap:9px;padding:5px 11px;border:1px solid var(--stroke);border-radius:3px;background:var(--panel-2)">
+      <span style="width:8px;height:8px;border-radius:50%;background:var(--ok);animation:pulse 2s ease-in-out infinite"></span>
+      <span style="font-size:10px;letter-spacing:0.1em;color:var(--fg-dim)">{{ t.interface }}</span>
+      <span style="font-size:10px;color:var(--stroke-2)">·</span>
+      <span style="font-size:10px;color:var(--fg)">D-CAN</span>
+      <span style="font-size:10px;color:var(--stroke-2)">·</span>
+      <span style="font-size:10px;letter-spacing:0.08em;color:var(--ok);font-weight:500">{{ t.connected }}</span>
+    </div>
+    <div style="display:flex;border:1px solid var(--stroke);border-radius:3px;overflow:hidden">
+      <button onClick="{{ setRu }}" style="{{ langRuStyle }}">RU</button>
+      <button onClick="{{ setEn }}" style="{{ langEnStyle }}">EN</button>
+    </div>
+    <div style="display:flex;border:1px solid var(--stroke);border-radius:3px;overflow:hidden">
+      <button onClick="{{ setDark }}" title="Dark" style="{{ thDarkStyle }}">☾</button>
+      <button onClick="{{ setLight }}" title="Light" style="{{ thLightStyle }}">☀</button>
+    </div>
+  </header>
+
+  <sc-if value="{{ inChassis }}" hint-placeholder-val="{{ true }}">
+  <main style="flex:1;display:grid;grid-template-columns:186px 1fr;min-height:0">
+
+    <aside style="background:var(--panel);border-right:1px solid var(--stroke);display:flex;flex-direction:column;min-width:0">
+      <div style="padding:12px 12px 9px;border-bottom:1px solid var(--stroke)">
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.18em;color:var(--fg-dim)">{{ t.series }}</span>
+      </div>
+      <div style="flex:1;overflow:auto;padding:6px 0">
+        <sc-for list="{{ seriesList }}" as="s" hint-placeholder-count="8">
+          <div onClick="{{ s.onClick }}" style="{{ s.style }}" style-hover="box-shadow:inset 0 0 0 999px rgba(127,127,127,0.05)">
+            <span style="font-size:15px;font-weight:700;width:22px">{{ s.label }}</span>
+            <span style="font-size:11px;flex:1;letter-spacing:0.02em">{{ s.name }}</span>
+            <span style="font-size:10px;color:var(--fg-faint)">{{ s.count }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </aside>
+
+    <section style="background:var(--bg);display:flex;flex-direction:column;min-width:0">
+      <div style="display:flex;align-items:center;gap:12px;height:46px;padding:0 14px;border-bottom:1px solid var(--stroke);flex:none">
+        <span style="font-size:12px;font-weight:700;letter-spacing:0.08em;color:var(--fg)">{{ t.select_chassis }}</span>
+        <span style="font-size:11px;color:var(--fg-faint)">/ {{ t.e_series }}</span>
+        <span style="flex:1"></span>
+        <div style="display:flex;align-items:center;gap:7px;padding:6px 10px;border:1px solid var(--stroke);border-radius:3px;background:var(--panel-2);width:232px">
+          <span style="color:var(--accent);font-size:12px">›</span>
+          <input value="{{ query }}" onInput="{{ onQuery }}" placeholder="{{ t.search_ph }}" style="border:none;background:transparent;outline:none;color:var(--fg);font-family:inherit;font-size:11px;width:100%"/>
+        </div>
+        <span style="font-size:10px;letter-spacing:0.06em;color:var(--fg-faint);white-space:nowrap">{{ resultsCount }} · {{ t.results }}</span>
+        <span style="font-size:10px;letter-spacing:0.06em;color:var(--fg-faint);white-space:nowrap;opacity:0.65">{{ t.dblhint }}</span>
+      </div>
+      <div style="flex:1;overflow:auto;padding:14px;display:grid;grid-template-columns:repeat(auto-fill,minmax(154px,1fr));grid-auto-rows:min-content;gap:10px;align-content:start">
+        <sc-for list="{{ chassisList }}" as="c" hint-placeholder-count="9">
+          <button onClick="{{ c.onClick }}" onDoubleClick="{{ c.onOpen }}" style="{{ c.style }}" style-hover="box-shadow:inset 0 0 0 999px rgba(127,127,127,0.06)">
+            <span style="font-size:21px;font-weight:700;letter-spacing:0.01em;color:var(--fg)">{{ c.code }}</span>
+            <span style="font-size:11px;color:var(--fg-dim)">{{ c.model }}</span>
+            <span style="font-size:11px;color:var(--fg-faint)">{{ c.years }}</span>
+            <div style="flex:1;min-height:6px"></div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;border-top:1px solid var(--stroke);padding-top:7px">
+              <span style="font-size:10px;letter-spacing:0.03em;color:var(--fg-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">{{ c.bodiesStr }}</span>
+              <span style="font-size:10px;color:var(--fg-faint);white-space:nowrap;flex:none">{{ c.ecus }} ECU</span>
+            </div>
+          </button>
+        </sc-for>
+      </div>
+    </section>
+
+
+  </main>
+  </sc-if>
+
+  <sc-if value="{{ inEcu }}">
+  <main style="flex:1;display:grid;grid-template-columns:186px 1fr 346px;min-height:0">
+
+    <aside style="background:var(--panel);border-right:1px solid var(--stroke);display:flex;flex-direction:column;min-width:0">
+      <div style="padding:12px 12px 9px;border-bottom:1px solid var(--stroke)">
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.18em;color:var(--fg-dim)">{{ t.category }}</span>
+      </div>
+      <div style="flex:1;overflow:auto;padding:6px 0">
+        <sc-for list="{{ ecuCatList }}" as="k" hint-placeholder-count="7">
+          <div onClick="{{ k.onClick }}" style="{{ k.style }}" style-hover="box-shadow:inset 0 0 0 999px rgba(127,127,127,0.05)">
+            <span style="font-size:11px;flex:1;letter-spacing:0.03em">{{ k.label }}</span>
+            <span style="font-size:10px;color:var(--fg-faint)">{{ k.count }}</span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="padding:11px 12px;border-top:1px solid var(--stroke);display:flex;flex-direction:column;gap:7px">
+        <div style="display:flex;align-items:center;gap:8px"><span style="width:8px;height:8px;border-radius:50%;background:var(--ok)"></span><span style="font-size:10px;letter-spacing:0.06em;color:var(--fg-dim)">{{ t.lg2_ok }}</span></div>
+        <div style="display:flex;align-items:center;gap:8px"><span style="width:8px;height:8px;border-radius:50%;background:var(--warn)"></span><span style="font-size:10px;letter-spacing:0.06em;color:var(--fg-dim)">{{ t.lg2_fault }}</span></div>
+        <div style="display:flex;align-items:center;gap:8px"><span style="width:8px;height:8px;border-radius:50%;background:var(--faint-dot)"></span><span style="font-size:10px;letter-spacing:0.06em;color:var(--fg-dim)">{{ t.lg2_nolink }}</span></div>
+      </div>
+    </aside>
+
+    <section style="background:var(--bg);display:flex;flex-direction:column;min-width:0">
+      <div style="display:flex;align-items:center;gap:12px;height:46px;padding:0 14px;border-bottom:1px solid var(--stroke);flex:none">
+        <span style="font-size:12px;font-weight:700;letter-spacing:0.08em;color:var(--fg);white-space:nowrap">{{ t.modules }}</span>
+        <span style="font-size:11px;color:var(--fg-faint)">/ {{ moduleCount }}</span>
+        <span style="flex:1"></span>
+        <sc-if value="{{ faultCountPos }}">
+          <span style="display:flex;align-items:center;gap:6px;font-size:10px;color:var(--warn);letter-spacing:0.04em;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:var(--warn)"></span>{{ faultCount }} {{ t.with_faults }}</span>
+        </sc-if>
+        <sc-if value="{{ scanning }}">
+          <button disabled style="display:flex;align-items:center;gap:8px;padding:7px 12px;border:1px solid var(--stroke);border-radius:3px;background:var(--panel-2);color:var(--fg-dim);font-family:inherit;font-size:11px;letter-spacing:0.06em;cursor:default;white-space:nowrap">{{ t.scanning }} {{ scanPctNum }}%</button>
+        </sc-if>
+        <sc-if value="{{ notScanning }}">
+          <button onClick="{{ onScan }}" style="display:flex;align-items:center;gap:8px;padding:7px 12px;border:1px solid var(--accent);border-radius:3px;background:transparent;color:var(--accent);font-family:inherit;font-size:11px;font-weight:500;letter-spacing:0.06em;cursor:pointer;white-space:nowrap" style-hover="box-shadow:inset 0 0 0 999px rgba(47,129,247,0.10)"><span>⟳</span><span>{{ t.scan_all }}</span></button>
+        </sc-if>
+      </div>
+      <div style="height:2px;background:var(--stroke);flex:none"><div style="{{ scanPctStyle }}"></div></div>
+      <div style="display:grid;grid-template-columns:14px 62px 1fr 58px 46px 78px;gap:8px;padding:8px 12px;border-bottom:1px solid var(--stroke);font-size:9px;letter-spacing:0.1em;color:var(--fg-faint);flex:none">
+        <span></span><span>{{ t.col_ecu }}</span><span>{{ t.col_system }}</span><span>{{ t.col_bus }}</span><span>{{ t.col_addr }}</span><span style="text-align:right">{{ t.col_status }}</span>
+      </div>
+      <div style="flex:1;overflow:auto">
+        <sc-for list="{{ moduleItems }}" as="m" hint-placeholder-count="12">
+          <div>
+            <sc-if value="{{ m.header }}">
+              <div style="padding:9px 12px 5px;font-size:9px;letter-spacing:0.16em;color:var(--fg-dim);background:var(--panel);border-bottom:1px solid var(--stroke)">{{ m.header }}</div>
+            </sc-if>
+            <div onClick="{{ m.onClick }}" onDoubleClick="{{ m.onOpen }}" style="{{ m.style }}" style-hover="box-shadow:inset 0 0 0 999px rgba(127,127,127,0.05)">
+              <span style="{{ m.dotStyle }}"></span>
+              <span style="font-size:13px;font-weight:700;color:var(--fg)">{{ m.code }}</span>
+              <span style="font-size:11px;color:var(--fg-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">{{ m.name }}</span>
+              <span style="font-size:10px;color:var(--fg-faint)">{{ m.bus }}</span>
+              <span style="font-size:10px;color:var(--fg-faint)">{{ m.addr }}</span>
+              <span style="{{ m.stStyle }}">{{ m.stLabel }}</span>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
+    <aside style="background:var(--panel);border-left:1px solid var(--stroke);display:flex;flex-direction:column;min-width:0;overflow:auto">
+      <sc-if value="{{ hasEcuSel }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;flex-direction:column;min-height:100%">
+          <div style="padding:15px 15px 13px;border-bottom:1px solid var(--stroke)">
+            <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+              <span style="font-size:24px;font-weight:700;color:var(--fg)">{{ ecuDetail.code }}</span>
+              <span style="font-size:12px;color:var(--fg-dim)">{{ ecuDetail.name }}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;margin-top:9px">
+              <span style="{{ ecuDetail.dotStyle }}"></span>
+              <span style="{{ ecuDetail.statusStyle }}">{{ ecuDetail.statusLabel }}</span>
+            </div>
+          </div>
+
+          <div style="padding:15px;display:grid;grid-template-columns:1fr 1fr;gap:12px 14px">
+            <div style="display:flex;flex-direction:column;gap:4px"><span style="font-size:9px;letter-spacing:0.14em;color:var(--fg-faint)">{{ t.category }}</span><span style="font-size:12px;color:var(--fg)">{{ ecuDetail.cat }}</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span style="font-size:9px;letter-spacing:0.14em;color:var(--fg-faint)">{{ t.bus }}</span><span style="font-size:12px;color:var(--fg)">{{ ecuDetail.bus }}</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span style="font-size:9px;letter-spacing:0.14em;color:var(--fg-faint)">{{ t.address }}</span><span style="font-size:12px;color:var(--fg)">{{ ecuDetail.addr }}</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span style="font-size:9px;letter-spacing:0.14em;color:var(--fg-faint)">{{ t.part_no }}</span><span style="font-size:12px;color:var(--fg)">{{ ecuDetail.part }}</span></div>
+            <div style="grid-column:1 / -1;display:flex;flex-direction:column;gap:4px"><span style="font-size:9px;letter-spacing:0.14em;color:var(--fg-faint)">{{ t.version }}</span><span style="font-size:12px;color:var(--fg)">{{ ecuDetail.ver }}</span></div>
+          </div>
+
+          <sc-if value="{{ ecuDetail.isFault }}">
+            <div style="padding:0 15px 6px">
+              <span style="font-size:9px;letter-spacing:0.14em;color:var(--fg-faint)">{{ t.dtc }}</span>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:9px">
+                <sc-for list="{{ ecuDetail.dtcs }}" as="d" hint-placeholder-count="2">
+                  <span style="padding:4px 8px;border:1px solid var(--warn);border-radius:3px;font-size:11px;color:var(--warn);font-weight:500">{{ d }}</span>
+                </sc-for>
+              </div>
+            </div>
+          </sc-if>
+          <sc-if value="{{ ecuDetail.isNolink }}">
+            <div style="margin:0 15px 6px;padding:10px 12px;border:1px dashed var(--stroke-2);border-radius:3px;font-size:10px;letter-spacing:0.06em;color:var(--fg-faint);text-align:center">{{ t.nolink_note }}</div>
+          </sc-if>
+
+          <div style="margin-top:auto;padding:15px;border-top:1px solid var(--stroke);display:flex;flex-direction:column;gap:8px">
+            <button onClick="{{ onConnect }}" style="display:flex;align-items:center;justify-content:center;gap:9px;padding:11px;border:none;border-radius:3px;background:var(--accent);color:var(--accent-fg);font-family:inherit;font-size:12px;font-weight:700;letter-spacing:0.08em;cursor:pointer" style-hover="box-shadow:inset 0 0 0 999px rgba(255,255,255,0.13)"><span>▸</span><span>{{ t.connect }}</span></button>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <button style="padding:9px;border:1px solid var(--stroke-2);border-radius:3px;background:transparent;color:var(--fg-dim);font-family:inherit;font-size:10px;letter-spacing:0.05em;cursor:pointer" style-hover="box-shadow:inset 0 0 0 999px rgba(127,127,127,0.06)">{{ t.read_faults }}</button>
+              <button style="padding:9px;border:1px solid var(--stroke-2);border-radius:3px;background:transparent;color:var(--fg-dim);font-family:inherit;font-size:10px;letter-spacing:0.05em;cursor:pointer" style-hover="box-shadow:inset 0 0 0 999px rgba(127,127,127,0.06)">{{ t.clear_mem }}</button>
+            </div>
+            <button style="padding:9px;border:1px solid var(--stroke-2);border-radius:3px;background:transparent;color:var(--fg-dim);font-family:inherit;font-size:11px;letter-spacing:0.06em;cursor:pointer" style-hover="box-shadow:inset 0 0 0 999px rgba(127,127,127,0.06)">{{ t.live_data }}</button>
+          </div>
+        </div>
+      </sc-if>
+      <sc-if value="{{ noEcuSel }}">
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--fg-faint);padding:30px;text-align:center;min-height:200px">
+          <span style="font-size:26px">◇</span>
+          <span style="font-size:11px;letter-spacing:0.08em">{{ t.pick_module }}</span>
+        </div>
+      </sc-if>
+    </aside>
+
+  </main>
+  </sc-if>
+
+  <sc-if value="{{ inSession }}">
+  <main style="flex:1;display:flex;flex-direction:column;min-height:0;background:var(--bg)">
+    <div style="display:flex;align-items:center;gap:12px;height:46px;padding:0 16px;border-bottom:1px solid var(--stroke);flex:none">
+      <span style="font-size:12px;font-weight:700;letter-spacing:0.08em;color:var(--fg);white-space:nowrap">{{ ses.title }}</span>
+      <span style="font-size:11px;color:var(--fg-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">{{ ses.path }}</span>
+      <span style="flex:1"></span>
+      <span style="font-size:10px;letter-spacing:0.06em;color:var(--fg-faint);border:1px solid var(--stroke);border-radius:3px;padding:4px 8px;white-space:nowrap">CFG · {{ ses.cfg }}</span>
+    </div>
+    <div style="flex:1;overflow:auto;padding:18px 18px 22px;display:flex;flex-direction:column;gap:22px">
+      <sc-for list="{{ ses.blocks }}" as="b" hint-placeholder-count="2">
+        <div style="{{ b.wrapStyle }}">
+          <sc-if value="{{ b.isNote }}">
+            <div style="font-size:13px;color:var(--fg-dim);letter-spacing:0.02em;line-height:1.55;max-width:620px">{{ b.text }}</div>
+          </sc-if>
+          <sc-if value="{{ b.isMenu }}">
+            <div style="display:flex;flex-direction:column;gap:5px;max-width:560px">
+              <sc-for list="{{ b.items }}" as="it" hint-placeholder-count="4">
+                <button onClick="{{ it.onClick }}" style="display:flex;align-items:center;gap:12px;padding:12px 13px;border:1px solid var(--stroke);border-radius:3px;background:var(--panel-2);color:var(--fg);font-family:inherit;font-size:13px;text-align:left;cursor:pointer" style-hover="box-shadow:inset 0 0 0 999px rgba(127,127,127,0.06)">
+                  <span style="font-size:10px;color:var(--fg-faint)">{{ it.idx }}</span>
+                  <span style="flex:1">{{ it.label }}</span>
+                  <span style="color:var(--accent)">›</span>
+                </button>
+              </sc-for>
+            </div>
+          </sc-if>
+          <sc-if value="{{ b.isKv }}">
+            <div style="display:flex;flex-direction:column;gap:9px;max-width:640px">
+              <sc-for list="{{ b.rows }}" as="r" hint-placeholder-count="6">
+                <div style="display:flex;gap:18px;align-items:baseline;border-bottom:1px solid var(--stroke);padding-bottom:9px">
+                  <span style="width:200px;flex:none;font-size:12px;color:var(--fg-faint);letter-spacing:0.03em">{{ r.k }}</span>
+                  <span style="font-size:13px;color:var(--fg)">{{ r.v }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+          <sc-if value="{{ b.faultsUnread }}">
+            <div style="display:flex;align-items:center;gap:10px;padding:14px 16px;border:1px dashed var(--stroke-2);border-radius:3px;max-width:560px;font-size:12px;color:var(--fg-dim)"><span style="color:var(--accent)">▸</span>{{ b.hint }}</div>
+          </sc-if>
+          <sc-if value="{{ b.faultsEmpty }}">
+            <div style="display:flex;align-items:center;gap:10px;padding:14px 16px;border:1px solid var(--stroke);border-radius:3px;max-width:560px;font-size:12px;color:var(--ok)"><span style="width:8px;height:8px;border-radius:50%;background:var(--ok)"></span>{{ b.emptyText }}</div>
+          </sc-if>
+          <sc-if value="{{ b.faultsList }}">
+            <div style="max-width:760px">
+              <div style="font-size:11px;letter-spacing:0.06em;color:var(--warn);margin-bottom:10px">{{ b.summary }}</div>
+              <sc-for list="{{ b.rows }}" as="r" hint-placeholder-count="2">
+                <div style="border-bottom:1px solid var(--stroke)">
+                  <div onClick="{{ r.onClick }}" style="display:grid;grid-template-columns:88px 1fr auto 16px;gap:14px;align-items:center;padding:10px 2px;cursor:pointer" style-hover="box-shadow:inset 0 0 0 999px rgba(127,127,127,0.05)">
+                    <span style="font-size:13px;font-weight:700;color:var(--warn)">{{ r.code }}</span>
+                    <span style="font-size:12px;color:var(--fg)">{{ r.desc }}</span>
+                    <span style="font-size:10px;letter-spacing:0.05em;color:{{ r.statusColor }};white-space:nowrap">{{ r.statusLabel }}</span>
+                    <span style="font-size:10px;color:var(--fg-faint);text-align:center">{{ r.caret }}</span>
+                  </div>
+                  <sc-if value="{{ r.expanded }}">
+                    <div style="padding:4px 2px 18px 16px;display:flex;flex-direction:column;gap:16px">
+                      <div style="font-size:12px;color:var(--fg-dim);line-height:1.55;max-width:660px">{{ r.descLong }}</div>
+                      <div>
+                        <span style="font-size:9px;letter-spacing:0.14em;color:var(--fg-faint)">{{ r.metaLabel }}</span>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 28px;margin-top:9px;max-width:560px">
+                          <sc-for list="{{ r.meta }}" as="mm" hint-placeholder-count="4">
+                            <div style="display:flex;justify-content:space-between;gap:14px;border-bottom:1px solid var(--stroke);padding-bottom:7px">
+                              <span style="font-size:11px;color:var(--fg-faint)">{{ mm.k }}</span>
+                              <span style="font-size:12px;color:var(--fg)">{{ mm.v }}</span>
+                            </div>
+                          </sc-for>
+                        </div>
+                      </div>
+                      <div>
+                        <span style="font-size:9px;letter-spacing:0.14em;color:var(--fg-faint)">{{ r.freezeLabel }}</span>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 28px;margin-top:9px;max-width:560px">
+                          <sc-for list="{{ r.freeze }}" as="ff" hint-placeholder-count="6">
+                            <div style="display:flex;justify-content:space-between;gap:14px;border-bottom:1px solid var(--stroke);padding-bottom:7px">
+                              <span style="font-size:11px;color:var(--fg-dim)">{{ ff.name }}</span>
+                              <span style="font-size:12px;color:var(--fg)"><span style="font-weight:700">{{ ff.val }}</span> <span style="font-size:10px;color:var(--fg-faint)">{{ ff.unit }}</span></span>
+                            </div>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </div>
+                  </sc-if>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+          <sc-if value="{{ b.isStream }}">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 44px;width:100%;align-content:start">
+              <sc-for list="{{ b.rows }}" as="p" hint-placeholder-count="6">
+                <div style="display:grid;grid-template-columns:150px 1fr 96px;gap:12px;align-items:center;min-height:40px;border-bottom:1px solid var(--stroke)">
+                  <span style="font-size:12px;color:var(--fg-dim)">{{ p.name }}</span>
+                  <div style="height:15px;background:var(--stroke);border-radius:2px;overflow:hidden;position:relative">
+                    <div style="{{ p.barStyle }}"></div>
+                    <sc-for list="{{ p.markers }}" as="mk" hint-placeholder-count="0"><div style="{{ mk.style }}"></div></sc-for>
+                  </div>
+                  <span style="text-align:right"><span style="{{ p.valStyle }}">{{ p.val }}</span> <span style="font-size:10px;color:var(--fg-faint)">{{ p.unit }}</span></span>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+          <sc-if value="{{ b.isStatus }}">
+            <div style="display:flex;flex-direction:column;gap:9px;max-width:520px">
+              <sc-for list="{{ b.rows }}" as="r" hint-placeholder-count="4">
+                <div style="display:flex;gap:18px;align-items:center;border-bottom:1px solid var(--stroke);padding-bottom:9px">
+                  <span style="width:200px;flex:none;font-size:12px;color:var(--fg-faint)">{{ r.k }}</span>
+                  <span style="font-size:12px;font-weight:500;letter-spacing:0.05em;color:{{ r.color }}">{{ r.label }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+    <div style="display:flex;gap:6px;padding:9px 12px;border-top:1px solid var(--stroke);background:var(--panel);flex:none">
+      <sc-for list="{{ ses.keys }}" as="fk" hint-placeholder-count="6">
+        <button onClick="{{ fk.onClick }}" style="{{ fk.style }}" style-hover="box-shadow:inset 0 0 0 999px rgba(127,127,127,0.05)">
+          <span style="{{ fk.tagStyle }}">F{{ fk.f }}</span>
+          <span style="font-size:11px;letter-spacing:0.04em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%">{{ fk.label }}</span>
+        </button>
+      </sc-for>
+    </div>
+  </main>
+  </sc-if>
+
+  <footer style="display:flex;align-items:center;height:26px;padding:0 12px;background:var(--panel);border-top:1px solid var(--stroke);font-size:10px;color:var(--fg-dim);letter-spacing:0.03em;flex:none">
+    <span>{{ t.adapter }}: OBDLINK EX</span>
+    <span style="margin:0 10px;color:var(--stroke-2)">│</span>
+    <span>PROTO: D-CAN</span>
+    <span style="margin:0 10px;color:var(--stroke-2)">│</span>
+    <span>KL15: <span style="color:var(--ok)">ON</span></span>
+    <span style="margin:0 10px;color:var(--stroke-2)">│</span>
+    <span>VBAT: {{ vbat }} V</span>
+    <span style="margin:0 10px;color:var(--stroke-2)">│</span>
+    <span>PING: 8 ms</span>
+    <span style="flex:1"></span>
+    <span>{{ clock }}</span>
+  </footer>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { theme:'dark', lang:'ru', series:'3', chassis:'E46', body:null, query:'',
+    view:'chassis', ecu:null, ecuCat:'ALL', scanState:'idle', scanPct:0,
+    sesStack:['main'], faultsRead:false, faultsCleared:false, faultOpen:null, tick:0,
+    clock:'--:--:--', vbat:'12.4' };
+
+  SERIES = [
+    {id:'1',label:'1'},{id:'3',label:'3'},{id:'5',label:'5'},{id:'6',label:'6'},
+    {id:'7',label:'7'},{id:'8',label:'8'},{id:'X',label:'X'},{id:'Z',label:'Z'}
+  ];
+
+  SNAME = {
+    ru:{'1':'1 серия','3':'3 серия','5':'5 серия','6':'6 серия','7':'7 серия','8':'8 серия','X':'X модели','Z':'Z модели'},
+    en:{'1':'1 Series','3':'3 Series','5':'5 Series','6':'6 Series','7':'7 Series','8':'8 Series','X':'X Models','Z':'Z Models'}
+  };
+
+  DATA = [
+    {code:'E81',s:'1',ru:'1 серия',en:'1 Series',years:'2007–2012',bodies:['HB3'],drive:['RWD'],eng:['N43','N45','N47','N54'],ecus:31,status:'partial'},
+    {code:'E82',s:'1',ru:'1 серия',en:'1 Series',years:'2007–2013',bodies:['CPE','CAB'],drive:['RWD'],eng:['N51','N52','N54','N55'],ecus:34,status:'ready'},
+    {code:'E87',s:'1',ru:'1 серия',en:'1 Series',years:'2004–2011',bodies:['HB5'],drive:['RWD'],eng:['N43','N45','N46','N47'],ecus:30,status:'ready'},
+    {code:'E88',s:'1',ru:'1 серия',en:'1 Series',years:'2008–2013',bodies:['CAB'],drive:['RWD'],eng:['N43','N52','N54'],ecus:33,status:'partial'},
+
+    {code:'E21',s:'3',ru:'3 серия',en:'3 Series',years:'1975–1983',bodies:['SED'],drive:['RWD'],eng:['M10','M20'],ecus:4,status:'none'},
+    {code:'E30',s:'3',ru:'3 серия',en:'3 Series',years:'1982–1994',bodies:['SED','TOU','CPE','CAB'],drive:['RWD','AWD'],eng:['M10','M20','M40','M42','S14'],ecus:9,status:'partial'},
+    {code:'E36',s:'3',ru:'3 серия',en:'3 Series',years:'1990–2000',bodies:['SED','TOU','CPE','CAB','CMP'],drive:['RWD'],eng:['M43','M50','M52','M44','S50','S52'],ecus:18,status:'ready'},
+    {code:'E46',s:'3',ru:'3 серия',en:'3 Series',years:'1998–2006',bodies:['SED','TOU','CPE','CAB'],drive:['RWD','AWD'],eng:['M43','M52','M54','M47','M57','S54'],ecus:28,status:'ready'},
+    {code:'E90',s:'3',ru:'3 серия',en:'3 Series',years:'2005–2013',bodies:['SED','TOU','CPE','CAB'],drive:['RWD','AWD'],eng:['N43','N46','N52','N53','N54','N55','N47','M57','S65'],ecus:41,status:'ready'},
+
+    {code:'E12',s:'5',ru:'5 серия',en:'5 Series',years:'1972–1981',bodies:['SED'],drive:['RWD'],eng:['M10','M30'],ecus:3,status:'none'},
+    {code:'E28',s:'5',ru:'5 серия',en:'5 Series',years:'1981–1988',bodies:['SED'],drive:['RWD'],eng:['M10','M20','M30','M21'],ecus:6,status:'none'},
+    {code:'E34',s:'5',ru:'5 серия',en:'5 Series',years:'1988–1996',bodies:['SED','TOU'],drive:['RWD','AWD'],eng:['M20','M40','M50','M60','M30','S38'],ecus:14,status:'partial'},
+    {code:'E39',s:'5',ru:'5 серия',en:'5 Series',years:'1995–2003',bodies:['SED','TOU'],drive:['RWD'],eng:['M52','M54','M62','M57','S62'],ecus:24,status:'ready'},
+    {code:'E60',s:'5',ru:'5 серия',en:'5 Series',years:'2003–2010',bodies:['SED','TOU'],drive:['RWD','AWD'],eng:['N52','N53','N54','M54','N62','M57','S85'],ecus:38,status:'ready'},
+
+    {code:'E24',s:'6',ru:'6 серия',en:'6 Series',years:'1976–1989',bodies:['CPE'],drive:['RWD'],eng:['M30','M88','S38'],ecus:5,status:'none'},
+    {code:'E63',s:'6',ru:'6 серия',en:'6 Series',years:'2003–2010',bodies:['CPE','CAB'],drive:['RWD'],eng:['N62','N52','S85'],ecus:36,status:'ready'},
+
+    {code:'E23',s:'7',ru:'7 серия',en:'7 Series',years:'1977–1986',bodies:['SED'],drive:['RWD'],eng:['M30'],ecus:5,status:'none'},
+    {code:'E32',s:'7',ru:'7 серия',en:'7 Series',years:'1986–1994',bodies:['SED','LWB'],drive:['RWD'],eng:['M30','M60','M70'],ecus:12,status:'partial'},
+    {code:'E38',s:'7',ru:'7 серия',en:'7 Series',years:'1994–2001',bodies:['SED','LWB'],drive:['RWD'],eng:['M52','M62','M57','M73'],ecus:26,status:'ready'},
+    {code:'E65',s:'7',ru:'7 серия',en:'7 Series',years:'2001–2008',bodies:['SED','LWB'],drive:['RWD'],eng:['N62','N52','M67','N73'],ecus:44,status:'ready'},
+
+    {code:'E31',s:'8',ru:'8 серия',en:'8 Series',years:'1989–1999',bodies:['CPE'],drive:['RWD'],eng:['M60','M62','M70','M73','S70'],ecus:16,status:'partial'},
+
+    {code:'E53',s:'X',ru:'X5',en:'X5',years:'1999–2006',bodies:['SAV'],drive:['AWD'],eng:['M54','M62','N62','M57'],ecus:27,status:'ready'},
+    {code:'E70',s:'X',ru:'X5',en:'X5',years:'2006–2013',bodies:['SAV'],drive:['AWD'],eng:['N52','N55','N62','M57','S63'],ecus:42,status:'ready'},
+    {code:'E83',s:'X',ru:'X3',en:'X3',years:'2003–2010',bodies:['SAV'],drive:['AWD'],eng:['M54','N52','M47','N47'],ecus:29,status:'partial'},
+    {code:'E71',s:'X',ru:'X6',en:'X6',years:'2008–2014',bodies:['SAV'],drive:['AWD'],eng:['N54','N55','N63','M57','S63'],ecus:43,status:'ready'},
+
+    {code:'E36/7',s:'Z',ru:'Z3',en:'Z3',years:'1995–2002',bodies:['ROD','CPE'],drive:['RWD'],eng:['M43','M44','M52','M54','S50','S52','S54'],ecus:17,status:'partial'},
+    {code:'E85',s:'Z',ru:'Z4',en:'Z4',years:'2002–2008',bodies:['ROD','CPE'],drive:['RWD'],eng:['N46','M54','N52','S54'],ecus:30,status:'ready'},
+    {code:'E52',s:'Z',ru:'Z8',en:'Z8',years:'1999–2003',bodies:['ROD'],drive:['RWD'],eng:['S62'],ecus:19,status:'partial'}
+  ];
+
+  CATS = [
+    {id:'PWR',ru:'СИЛОВОЙ АГРЕГАТ',en:'POWERTRAIN'},
+    {id:'CHS',ru:'ШАССИ',en:'CHASSIS'},
+    {id:'SAF',ru:'БЕЗОПАСНОСТЬ',en:'SAFETY'},
+    {id:'BDY',ru:'КУЗОВ',en:'BODY'},
+    {id:'GWY',ru:'ШЛЮЗ',en:'GATEWAY'},
+    {id:'INF',ru:'МУЛЬТИМЕДИА',en:'INFOTAINMENT'}
+  ];
+
+  MODS = [
+    {code:'DME',ru:'Двигатель (бензин)',en:'Engine (petrol)',cat:'PWR',bus:'PT-CAN',addr:'0x12',from:1987,to:9999},
+    {code:'EGS',ru:'АКПП',en:'Transmission',cat:'PWR',bus:'PT-CAN',addr:'0x32',from:1991,to:9999},
+    {code:'VGSG',ru:'Раздаточная коробка',en:'Transfer case',cat:'PWR',bus:'PT-CAN',addr:'0x39',from:2003,to:9999,cond:'awd'},
+
+    {code:'DSC',ru:'Динамич. стабилизация',en:'Stability control',cat:'CHS',bus:'PT-CAN',addr:'0x56',from:1998,to:9999},
+    {code:'ABS',ru:'Антиблок. тормоза',en:'Anti-lock brakes',cat:'CHS',bus:'DS2',addr:'0x56',from:1988,to:2002},
+    {code:'EPS',ru:'Усилитель руля',en:'Power steering',cat:'CHS',bus:'PT-CAN',addr:'0x7F',from:2004,to:9999},
+    {code:'EHC',ru:'Пневмоподвеска',en:'Air suspension',cat:'CHS',bus:'PT-CAN',addr:'0x6D',from:2001,to:9999},
+
+    {code:'MRS',ru:'Система Airbag',en:'Airbag (MRS)',cat:'SAF',bus:'K-bus',addr:'0xA4',from:1990,to:2007},
+    {code:'ACSM',ru:'Датчики удара',en:'Crash safety',cat:'SAF',bus:'F-CAN',addr:'0x63',from:2007,to:9999},
+
+    {code:'CAS',ru:'Доступ в автомобиль',en:'Car Access',cat:'BDY',bus:'K-CAN',addr:'0x40',from:2004,to:9999},
+    {code:'EWS',ru:'Иммобилайзер',en:'Immobiliser',cat:'BDY',bus:'K-bus',addr:'0x44',from:1994,to:2006},
+    {code:'GM',ru:'Электрика кузова',en:'Body electronics',cat:'BDY',bus:'K-bus',addr:'0x00',from:1994,to:2008},
+    {code:'LCM',ru:'Блок света',en:'Light control',cat:'BDY',bus:'K-bus',addr:'0xD0',from:1994,to:2006},
+    {code:'FRM',ru:'Модуль света (FRM)',en:'Footwell/Light (FRM)',cat:'BDY',bus:'K-CAN',addr:'0x72',from:2004,to:9999},
+    {code:'IHKA',ru:'Климат-контроль',en:'Climate control',cat:'BDY',bus:'K-bus',addr:'0x5B',from:1994,to:9999},
+    {code:'SZL',ru:'Датчик угла руля',en:'Steering column',cat:'BDY',bus:'K-CAN',addr:'0x57',from:2001,to:9999},
+    {code:'PDC',ru:'Парктроник',en:'Park distance',cat:'BDY',bus:'K-bus',addr:'0x60',from:1999,to:9999},
+    {code:'RLS',ru:'Датчик дождя/света',en:'Rain-light sensor',cat:'BDY',bus:'K-CAN',addr:'0x71',from:2001,to:9999},
+    {code:'SM',ru:'Модуль сидений',en:'Seat module',cat:'BDY',bus:'K-bus',addr:'0x76',from:1998,to:2008},
+
+    {code:'ZGM',ru:'Центральный шлюз',en:'Central gateway',cat:'GWY',bus:'CAN',addr:'0x10',from:2001,to:9999},
+    {code:'KOMBI',ru:'Приборная панель',en:'Instrument cluster',cat:'GWY',bus:'K-bus',addr:'0x80',from:1990,to:9999},
+    {code:'DWA',ru:'Сигнализация',en:'Alarm system',cat:'GWY',bus:'K-bus',addr:'0x29',from:1998,to:9999},
+
+    {code:'RAD',ru:'Магнитола',en:'Radio',cat:'INF',bus:'I-bus',addr:'0x68',from:1994,to:2004},
+    {code:'CCC',ru:'Головное устройство',en:'Head unit (CCC/CIC)',cat:'INF',bus:'MOST',addr:'0x60',from:2004,to:9999},
+    {code:'NAV',ru:'Навигация',en:'Navigation',cat:'INF',bus:'I-bus',addr:'0x7E',from:1996,to:2008},
+    {code:'DSP',ru:'Аудиоусилитель',en:'DSP amplifier',cat:'INF',bus:'I-bus',addr:'0x6A',from:1998,to:2008},
+    {code:'TEL',ru:'Телефон',en:'Telephone',cat:'INF',bus:'I-bus',addr:'0x46',from:1997,to:2008}
+  ];
+
+  FAULTDESC = {
+    PWR:[ {ru:'Пропуски воспламенения',en:'Misfire detected'}, {ru:'Датчик кислорода, банк 1',en:'O2 sensor, bank 1'}, {ru:'Клапан VANOS',en:'VANOS solenoid'}, {ru:'Форсунка, обрыв цепи',en:'Injector open circuit'}, {ru:'Датчик детонации',en:'Knock sensor'}, {ru:'Смесь слишком бедная',en:'Mixture too lean'} ],
+    CHS:[ {ru:'Датчик скорости колеса',en:'Wheel speed sensor'}, {ru:'Датчик угла руля',en:'Steering angle sensor'}, {ru:'Датчик давления в тормозах',en:'Brake pressure sensor'}, {ru:'Клапан гидроблока',en:'Hydraulic valve'} ],
+    SAF:[ {ru:'Цепь подушки водителя',en:'Driver airbag circuit'}, {ru:'Преднатяжитель ремня',en:'Belt pretensioner'}, {ru:'Датчик удара',en:'Crash sensor'} ],
+    BDY:[ {ru:'Обрыв цепи освещения',en:'Lighting circuit open'}, {ru:'Концевик двери',en:'Door contact switch'}, {ru:'Мотор стеклоподъёмника',en:'Window motor'}, {ru:'Датчик температуры салона',en:'Cabin temp sensor'} ],
+    GWY:[ {ru:'Потеря связи по шине',en:'Bus communication lost'}, {ru:'Рассогласование версий ПО',en:'Software version mismatch'} ],
+    INF:[ {ru:'Обрыв кольца MOST',en:'MOST ring break'}, {ru:'Динамик, обрыв цепи',en:'Speaker open circuit'}, {ru:'Неисправность антенны',en:'Antenna fault'} ],
+    def:[ {ru:'Обрыв цепи',en:'Open circuit'}, {ru:'Короткое замыкание',en:'Short circuit'}, {ru:'Сигнал вне диапазона',en:'Signal out of range'}, {ru:'Внутренняя ошибка блока',en:'Internal module fault'} ]
+  };
+
+  STR = {
+    ru:{ title_sub:'СИСТЕМА ДИАГНОСТИКИ', interface:'ИНТЕРФЕЙС', connected:'СВЯЗЬ ЕСТЬ', series:'СЕРИЯ',
+      select_chassis:'ВЫБОР КУЗОВА', e_series:'E-СЕРИЯ', search_ph:'код или модель…', results:'НАЙДЕНО', dblhint:'2× — открыть',
+      years:'ГОДЫ', drive:'ПРИВОД', modules:'МОДУЛИ ЭБУ', body_variant:'ВАРИАНТ КУЗОВА', engines:'ДВИГАТЕЛИ',
+      start:'НАЧАТЬ СЕССИЮ', ecu_profile:'ПРОФИЛЬ ЭБУ', silhouette:'СИЛУЭТ КУЗОВА', adapter:'АДАПТЕР',
+      empty:'ВЫБЕРИТЕ КУЗОВ', st_ready:'ПРОФИЛЬ ГОТОВ', st_partial:'ЧАСТИЧНЫЙ ПРОФИЛЬ', st_none:'НЕТ ПРОФИЛЯ',
+      lg_ready:'ГОТОВ', lg_partial:'ЧАСТИЧНО', lg_none:'НЕТ',
+      back:'КУЗОВ', back_ecu:'ЭБУ', category:'КАТЕГОРИЯ', all:'ВСЕ', with_faults:'с ошибками',
+      scan_all:'СКАН ВСЕХ', scanning:'СКАН',
+      col_ecu:'ЭБУ', col_system:'СИСТЕМА', col_bus:'ШИНА', col_addr:'АДРЕС', col_status:'СТАТУС',
+      lg2_ok:'НОРМА', lg2_fault:'ОШИБКИ', lg2_nolink:'НЕТ СВЯЗИ', st_nolink:'НЕТ СВЯЗИ',
+      bus:'ШИНА', address:'АДРЕС', part_no:'НОМЕР ДЕТАЛИ', version:'ВЕРСИЯ ПО / HW', dtc:'КОДЫ ОШИБОК',
+      nolink_note:'МОДУЛЬ НЕ ОТВЕЧАЕТ', pick_module:'ВЫБЕРИТЕ МОДУЛЬ',
+      connect:'ПОДКЛЮЧИТЬСЯ', read_faults:'ЧИТАТЬ ОШИБКИ', clear_mem:'СБРОС ПАМЯТИ', live_data:'ЖИВЫЕ ДАННЫЕ' },
+    en:{ title_sub:'DIAGNOSTIC SYSTEM', interface:'INTERFACE', connected:'CONNECTED', series:'SERIES',
+      select_chassis:'SELECT CHASSIS', e_series:'E-SERIES', search_ph:'code or model…', results:'RESULTS', dblhint:'2× to open',
+      years:'YEARS', drive:'DRIVE', modules:'ECU MODULES', body_variant:'BODY VARIANT', engines:'ENGINES',
+      start:'START SESSION', ecu_profile:'ECU PROFILE', silhouette:'VEHICLE SILHOUETTE', adapter:'ADAPTER',
+      empty:'SELECT A CHASSIS', st_ready:'PROFILE READY', st_partial:'PARTIAL PROFILE', st_none:'NO PROFILE',
+      lg_ready:'READY', lg_partial:'PARTIAL', lg_none:'NONE',
+      back:'CHASSIS', back_ecu:'ECU', category:'CATEGORY', all:'ALL', with_faults:'with faults',
+      scan_all:'SCAN ALL', scanning:'SCAN',
+      col_ecu:'ECU', col_system:'SYSTEM', col_bus:'BUS', col_addr:'ADDR', col_status:'STATUS',
+      lg2_ok:'OK', lg2_fault:'FAULTS', lg2_nolink:'NO LINK', st_nolink:'NO LINK',
+      bus:'BUS', address:'ADDRESS', part_no:'PART NUMBER', version:'SW / HW VERSION', dtc:'FAULT CODES',
+      nolink_note:'MODULE NOT RESPONDING', pick_module:'SELECT A MODULE',
+      connect:'CONNECT', read_faults:'READ FAULTS', clear_mem:'CLEAR MEMORY', live_data:'LIVE DATA' }
+  };
+
+  BODY = {
+    ru:{SED:'седан',TOU:'универсал',CPE:'купе',CAB:'кабрио',HB3:'хэтч 3д',HB5:'хэтч 5д',SAV:'кроссовер',ROD:'родстер',CMP:'компакт',LWB:'дл. база'},
+    en:{SED:'Sedan',TOU:'Touring',CPE:'Coupé',CAB:'Cabrio',HB3:'3-dr Hatch',HB5:'5-dr Hatch',SAV:'SAV',ROD:'Roadster',CMP:'Compact',LWB:'LWB'}
+  };
+
+  STCOLOR = { ready:'var(--ok)', partial:'var(--warn)', none:'var(--faint-dot)' };
+
+  componentDidMount(){
+    const tick = () => {
+      const d = new Date();
+      const p = n => String(n).padStart(2,'0');
+      this.setState({
+        clock: p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()),
+        vbat: (12.2 + Math.random()*0.4).toFixed(1)
+      });
+    };
+    tick();
+    this._iv = setInterval(tick, 1000);
+    this._keyh = (e) => {
+      if (this.state.view !== 'session') return;
+      let f = null;
+      const mf = /^F([1-6])$/.exec(e.key);
+      if (mf) f = +mf[1];
+      else if (/^[1-6]$/.test(e.key)) f = +e.key;
+      if (f){ e.preventDefault(); this.fireKey(f); }
+      else if (e.key === 'Escape'){ e.preventDefault(); this.popPage(); }
+    };
+    window.addEventListener('keydown', this._keyh);
+  }
+  componentWillUnmount(){ clearInterval(this._iv); clearInterval(this._scan); clearInterval(this._stream); if (this._keyh) window.removeEventListener('keydown', this._keyh); }
+
+  parseYears(str){ const p = String(str).split('–'); return [parseInt(p[0],10), parseInt(p[1],10)]; }
+
+  modsFor(sel){
+    if (!sel) return [];
+    const [y0,y1] = this.parseYears(sel.years);
+    const awd = sel.drive.includes('AWD');
+    return this.MODS.filter(m => m.from <= y1 && m.to >= y0 && (m.cond !== 'awd' || awd));
+  }
+
+  enrich(m){
+    let h = 0; for (const ch of m.code) h = (h*31 + ch.charCodeAt(0)) % 99991;
+    const r = h % 12;
+    const status = r === 0 ? 'nolink' : (r < 3 ? 'fault' : 'ok');
+    const faults = status === 'fault' ? (h % 3) + 1 : 0;
+    return Object.assign({}, m, { hash:h, status, faults });
+  }
+
+  startScan(){
+    clearInterval(this._scan);
+    this.setState({ scanState:'scanning', scanPct:0 });
+    this._scan = setInterval(() => {
+      this.setState(s => {
+        const p = s.scanPct + 7 + Math.random()*6;
+        if (p >= 100){ clearInterval(this._scan); return { scanPct:100, scanState:'done' }; }
+        return { scanPct:p };
+      });
+    }, 60);
+  }
+
+  goEcu(){
+    const sel = this.DATA.find(d => d.code === this.state.chassis);
+    const list = this.modsFor(sel);
+    this.setState({ view:'ecu', ecuCat:'ALL', ecu: list[0] ? list[0].code : null });
+    this.startScan();
+  }
+
+  openChassis(code){
+    const sel = this.DATA.find(d => d.code === code);
+    const list = this.modsFor(sel);
+    this.setState({ chassis:code, body: sel ? sel.bodies[0] : null, view:'ecu', ecuCat:'ALL', ecu: list[0] ? list[0].code : null });
+    this.startScan();
+  }
+
+  // ---- ECU session (config-driven page tree) ----
+  connect(code){
+    if (!code) return;
+    this.setState({ ecu:code, view:'session', sesStack:['main'], faultsRead:false, faultsCleared:false, faultOpen:null, tick:0 });
+    this.startStream();
+  }
+  startStream(){ clearInterval(this._stream); this._stream = setInterval(() => this.setState(s => ({ tick:(s.tick||0)+1 })), 600); }
+  exitSession(){ clearInterval(this._stream); this.setState({ view:'ecu' }); }
+  pushPage(id){ this.setState(s => ({ sesStack:[...(s.sesStack||['main']), id] })); }
+  popPage(){ this.setState(s => { const st = s.sesStack || ['main']; return st.length > 1 ? { sesStack: st.slice(0,-1) } : { view:'ecu' }; }); }
+  currentEm(){ const sel = this.DATA.find(d => d.code === this.state.chassis); return this.modsFor(sel).map(x => this.enrich(x)).find(x => x.code === this.state.ecu) || null; }
+  fireKey(f){
+    const em = this.currentEm(); if (!em) return;
+    const S = this.screensFor(em); const st = this.state.sesStack || ['main'];
+    const page = S[st[st.length-1]] || S.main; const k = (page.keys||[]).find(x => x.f === f); if (!k) return;
+    if (k.to) this.pushPage(k.to);
+    else if (k.back) this.popPage();
+    else if (k.exit) this.exitSession();
+    else if (k.action === 'read') this.setState({ faultsRead:true, faultsCleared:false });
+    else if (k.action === 'clear') this.setState({ faultsCleared:true });
+  }
+
+  streamGroups(cat){
+    if (cat === 'PWR') return [
+      { id:'sg_eng', name:{ru:'Двигатель',en:'Engine'}, params:[
+        {name:{ru:'Обороты',en:'Engine speed'},unit:'1/min',base:815,amp:70,min:0,max:7000,hi:0.82},
+        {name:{ru:'Температура ОЖ',en:'Coolant temp'},unit:'°C',base:96,amp:2,min:0,max:130,hi:0.7},
+        {name:{ru:'Расход воздуха',en:'Air mass'},unit:'kg/h',base:12.6,amp:1.4,min:0,max:900,dec:1},
+        {name:{ru:'Нагрузка',en:'Load'},unit:'%',base:17,amp:3,min:0,max:100,dec:1,hi:0.85},
+        {name:{ru:'Угол опережения',en:'Ign. advance'},unit:'°',base:13,amp:2,min:-10,max:40,dec:1},
+        {name:{ru:'Лямбда, банк 1',en:'Lambda bank 1'},unit:'λ',base:0.99,amp:0.04,min:0.7,max:1.3,dec:2,lo:0.35,hi:0.65}
+      ]},
+      { id:'sg_fuel', name:{ru:'Топливоподача',en:'Fuel system'}, params:[
+        {name:{ru:'Давление топлива',en:'Fuel pressure'},unit:'bar',base:3.8,amp:0.08,min:0,max:6,dec:1,lo:0.5},
+        {name:{ru:'Коррекция аддит.',en:'Additive trim'},unit:'%',base:1.4,amp:0.8,min:-25,max:25,dec:1},
+        {name:{ru:'Коррекция мульт.',en:'Multipl. trim'},unit:'%',base:-0.6,amp:0.8,min:-25,max:25,dec:1},
+        {name:{ru:'Время впрыска',en:'Injection time'},unit:'ms',base:3.1,amp:0.25,min:0,max:20,dec:2}
+      ]},
+      { id:'sg_elec', name:{ru:'Электрика',en:'Electrical'}, params:[
+        {name:{ru:'Напряжение АКБ',en:'Battery voltage'},unit:'V',base:14.1,amp:0.08,min:0,max:16,dec:1,lo:0.75,hi:0.95},
+        {name:{ru:'Температура впуска',en:'Intake temp'},unit:'°C',base:30,amp:1,min:-40,max:120},
+        {name:{ru:'Положение ДЗ',en:'Throttle pos.'},unit:'%',base:3.1,amp:0.4,min:0,max:100,dec:1}
+      ]}
+    ];
+    if (cat === 'CHS') return [
+      { id:'sg_whl', name:{ru:'Скорости колёс',en:'Wheel speeds'}, params:[
+        {name:{ru:'Переднее левое',en:'Front left'},unit:'km/h',base:0,amp:0,min:0,max:300},
+        {name:{ru:'Переднее правое',en:'Front right'},unit:'km/h',base:0,amp:0,min:0,max:300},
+        {name:{ru:'Заднее левое',en:'Rear left'},unit:'km/h',base:0,amp:0,min:0,max:300},
+        {name:{ru:'Заднее правое',en:'Rear right'},unit:'km/h',base:0,amp:0,min:0,max:300}
+      ]},
+      { id:'sg_dyn', name:{ru:'Динамика',en:'Dynamics'}, params:[
+        {name:{ru:'Угол руля',en:'Steering angle'},unit:'°',base:0,amp:3,min:-540,max:540,dec:1},
+        {name:{ru:'Поперечное уск.',en:'Lateral acc.'},unit:'m/s²',base:0,amp:0.25,min:-12,max:12,dec:2},
+        {name:{ru:'Скорость рыскания',en:'Yaw rate'},unit:'°/s',base:0,amp:1,min:-75,max:75,dec:1},
+        {name:{ru:'Давление тормоза',en:'Brake pressure'},unit:'bar',base:0,amp:0,min:0,max:250,dec:1}
+      ]}
+    ];
+    return [
+      { id:'sg_gen', name:{ru:'Основные',en:'General'}, params:[
+        {name:{ru:'Напряжение питания',en:'Supply voltage'},unit:'V',base:13.9,amp:0.08,min:0,max:16,dec:1},
+        {name:{ru:'Внутр. температура',en:'Internal temp'},unit:'°C',base:33,amp:1,min:-40,max:120},
+        {name:{ru:'Клемма 15',en:'Terminal 15'},unit:'',base:1,amp:0,min:0,max:1,bool:true},
+        {name:{ru:'Клемма 30',en:'Terminal 30'},unit:'V',base:12.4,amp:0.05,min:0,max:16,dec:1}
+      ]}
+    ];
+  }
+
+  screensFor(em){
+    const groups = this.streamGroups(em.cat);
+    const S = {};
+    S.main = { title:{ru:'ГЛАВНОЕ МЕНЮ',en:'MAIN MENU'},
+      blocks:[
+        {type:'note', text:{ru:'Блок '+em.code+' на связи. Выберите функцию клавишами F1–F6 или мышью.',en:'Module '+em.code+' online. Select a function with F1–F6 or click.'}},
+        {type:'menu', items:[
+          {label:{ru:'Идентификация блока',en:'Module identification'}, to:'ident'},
+          {label:{ru:'Память ошибок',en:'Fault memory'}, to:'faults'},
+          {label:{ru:'Поток данных',en:'Data stream'}, to:'stream'},
+          {label:{ru:'Состояние блока',en:'Module status'}, to:'status'},
+          {label:{ru:'Активация компонентов',en:'Component activation'}, to:'act'}
+        ]}
+      ],
+      keys:[ {f:1,label:{ru:'ИДЕНТ',en:'IDENT'},to:'ident'}, {f:2,label:{ru:'ОШИБКИ',en:'FAULTS'},to:'faults'},
+        {f:3,label:{ru:'ПОТОК',en:'STREAM'},to:'stream'}, {f:4,label:{ru:'СТАТУС',en:'STATUS'},to:'status'},
+        {f:5,label:{ru:'АКТИВ.',en:'ACTIV.'},to:'act'}, {f:6,label:{ru:'ВЫХОД',en:'EXIT'},exit:true} ] };
+
+    S.ident = { title:{ru:'ИДЕНТИФИКАЦИЯ',en:'IDENTIFICATION'},
+      blocks:[{type:'kv'}], keys:[{f:6,label:{ru:'НАЗАД',en:'BACK'},back:true}] };
+
+    S.faults = { title:{ru:'ПАМЯТЬ ОШИБОК',en:'FAULT MEMORY'},
+      blocks:[{type:'faults'}],
+      keys:[ {f:1,label:{ru:'ЧИТАТЬ',en:'READ'},action:'read'}, {f:2,label:{ru:'СБРОС',en:'CLEAR'},action:'clear'},
+        {f:6,label:{ru:'НАЗАД',en:'BACK'},back:true} ] };
+
+    S.stream = { title:{ru:'ПОТОК ДАННЫХ',en:'DATA STREAM'},
+      blocks:[ {type:'note', text:{ru:'Выберите группу параметров.',en:'Select a parameter group.'}},
+        {type:'menu', items: groups.map(g => ({ label:g.name, to:'stream_'+g.id })) } ],
+      keys:[{f:6,label:{ru:'НАЗАД',en:'BACK'},back:true}] };
+    groups.forEach(g => {
+      S['stream_'+g.id] = { title:g.name,
+        blocks:[{type:'stream', params:g.params}],
+        keys:[{f:6,label:{ru:'НАЗАД',en:'BACK'},back:true}] };
+    });
+
+    S.status = { title:{ru:'СОСТОЯНИЕ',en:'STATUS'},
+      blocks:[{type:'status'}], keys:[{f:6,label:{ru:'НАЗАД',en:'BACK'},back:true}] };
+
+    S.act = { title:{ru:'АКТИВАЦИЯ',en:'ACTIVATION'},
+      blocks:[ {type:'note', text:{ru:'Выберите компонент для активации.',en:'Select a component to activate.'}},
+        {type:'menu', items:[
+          {label:{ru:'Реле топливного насоса',en:'Fuel pump relay'}, to:'act_run'},
+          {label:{ru:'Вентилятор радиатора',en:'Radiator fan'}, to:'act_run'},
+          {label:{ru:'Лампа Check-Engine',en:'Check-engine lamp'}, to:'act_run'}
+        ]} ],
+      keys:[{f:6,label:{ru:'НАЗАД',en:'BACK'},back:true}] };
+    S.act_run = { title:{ru:'АКТИВАЦИЯ',en:'ACTIVATION'},
+      blocks:[{type:'note', text:{ru:'F1 — запустить активацию. Двигатель должен работать на холостом ходу, стояночный тормоз включён.',en:'F1 — run activation. Engine must idle, parking brake engaged.'}}],
+      keys:[ {f:1,label:{ru:'ПУСК',en:'RUN'},action:'noop'}, {f:6,label:{ru:'НАЗАД',en:'BACK'},back:true} ] };
+
+    return S;
+  }
+
+  resolveBlock(bl, em, lang){
+    if (bl.type === 'note') return { isNote:true, text: bl.text[lang] };
+    if (bl.type === 'menu') return { isMenu:true, items: bl.items.map((it,idx) => ({ idx:String(idx+1).padStart(2,'0'), label:it.label[lang], onClick:()=>this.pushPage(it.to) })) };
+    if (bl.type === 'kv'){
+      const h = em.hash;
+      const sup = ['Bosch','Siemens VDO','Continental','Magneti Marelli','Valeo'][h % 5];
+      const yr = 1998 + (h % 16), wk = 1 + (h % 52);
+      const rows = [
+        {k:{ru:'Блок',en:'Module'}, v: em.code+' · '+em[lang]},
+        {k:{ru:'Номер детали',en:'Part number'}, v:'6512 '+String(h%10000).padStart(4,'0')},
+        {k:{ru:'Версия HW / SW',en:'HW / SW version'}, v:'0x'+(h%256).toString(16).toUpperCase().padStart(2,'0')+' / 0x'+((h>>4)%256).toString(16).toUpperCase().padStart(2,'0')},
+        {k:{ru:'Индекс диагноза',en:'Diagnostic index'}, v:'0x'+((h>>2)%256).toString(16).toUpperCase().padStart(2,'0')},
+        {k:{ru:'Индекс кодирования',en:'Coding index'}, v:'0x'+((h>>5)%256).toString(16).toUpperCase().padStart(2,'0')},
+        {k:{ru:'Шина / адрес',en:'Bus / address'}, v: em.bus+' / '+em.addr},
+        {k:{ru:'Поставщик',en:'Supplier'}, v: sup},
+        {k:{ru:'Дата выпуска',en:'Manufactured'}, v: String(wk).padStart(2,'0')+' / '+yr},
+        {k:{ru:'VIN автомобиля',en:'Vehicle VIN'}, v:'WBA'+(h%9)+'V'+String(h%100000).padStart(5,'0')}
+      ];
+      return { isKv:true, rows: rows.map(r => ({ k:r.k[lang], v:r.v })) };
+    }
+    if (bl.type === 'faults'){
+      if (!this.state.faultsRead) return { isFaults:true, faultsUnread:true, hint: lang==='ru'?'Нажмите F1 — читать память ошибок':'Press F1 — read fault memory' };
+      if (this.state.faultsCleared || !em.faults) return { isFaults:true, faultsEmpty:true, emptyText: lang==='ru'?'Память ошибок пуста':'Fault memory is empty' };
+      const pool = this.FAULTDESC[em.cat] || this.FAULTDESC.def;
+      const openCode = this.state.faultOpen;
+      const rows = [];
+      for (let i=0;i<em.faults;i++){
+        const hh = (em.hash*(i+7)) % 65536;
+        const present = i % 2 === 0;
+        const code = hh.toString(16).toUpperCase().padStart(4,'0');
+        const short = pool[(em.hash+i) % pool.length][lang];
+        const statusLabel = present ? (lang==='ru'?'присутствует':'present') : (lang==='ru'?'сохранён':'stored');
+        const expanded = openCode === code;
+        const row = { code, desc:short, statusLabel, statusColor: present ? 'var(--warn)' : 'var(--fg-dim)',
+          caret: expanded ? '▾' : '▸', expanded,
+          onClick: () => this.setState(s => ({ faultOpen: s.faultOpen === code ? null : code })) };
+        if (expanded){
+          row.descLong = short + '. ' + (lang==='ru'
+            ? 'Проверьте электропроводку, разъёмы и питание компонента; при необходимости замените датчик и очистите память после ремонта.'
+            : 'Check wiring, connectors and component supply; replace the sensor if required and clear the memory after repair.');
+          row.metaLabel = lang==='ru' ? 'СВЕДЕНИЯ' : 'DETAILS';
+          row.freezeLabel = lang==='ru' ? 'СТОП-КАДР ПАРАМЕТРОВ' : 'FREEZE FRAME';
+          const rr = (seed,mn,mx,dec) => { const x = ((hh*seed)%997)/997; return (mn+(mx-mn)*x).toFixed(dec||0); };
+          const mileage = (((hh%280)+20)*1000);
+          row.meta = [
+            {k:(lang==='ru'?'Статус':'Status'), v: statusLabel},
+            {k:(lang==='ru'?'Появлений':'Occurrences'), v: String(1+(hh%40))},
+            {k:(lang==='ru'?'Пробег при фиксации':'Mileage at set'), v: String(mileage).replace(/\B(?=(\d{3})+(?!\d))/g,' ')+' km'},
+            {k:(lang==='ru'?'Приоритет':'Priority'), v: String(1+(hh%9))}
+          ];
+          row.freeze = [
+            {name:(lang==='ru'?'Обороты':'Engine speed'), val:rr(3,700,4500,0), unit:'1/min'},
+            {name:(lang==='ru'?'Температура ОЖ':'Coolant temp'), val:rr(5,60,112,0), unit:'°C'},
+            {name:(lang==='ru'?'Скорость':'Vehicle speed'), val:rr(7,0,140,0), unit:'km/h'},
+            {name:(lang==='ru'?'Нагрузка':'Load'), val:rr(11,5,95,1), unit:'%'},
+            {name:(lang==='ru'?'Напряжение АКБ':'Battery'), val:rr(13,11.8,14.6,1), unit:'V'},
+            {name:(lang==='ru'?'Темп. впуска':'Intake temp'), val:rr(17,-10,60,0), unit:'°C'}
+          ];
+        }
+        rows.push(row);
+      }
+      return { isFaults:true, faultsList:true, summary:(lang==='ru'? em.faults+' ошибок в памяти' : em.faults+' faults stored'), rows };
+    }
+    if (bl.type === 'stream'){
+      const tick = this.state.tick || 0;
+      const rows = bl.params.map((p,idx) => {
+        let v = p.base;
+        if (p.amp) v += p.amp*Math.sin(tick*0.7 + idx*1.3) + (Math.random()-0.5)*p.amp*0.4;
+        if (p.min != null) v = Math.max(p.min, Math.min(p.max, v));
+        const val = p.bool ? (v>=0.5 ? (lang==='ru'?'ВКЛ':'ON') : (lang==='ru'?'ВЫКЛ':'OFF')) : v.toFixed(p.dec||0);
+        const pct = (p.max>p.min) ? Math.max(0, Math.min(100, (v-p.min)/(p.max-p.min)*100)) : 0;
+        const hiP = p.hi != null ? p.hi*100 : null;
+        const loP = p.lo != null ? p.lo*100 : null;
+        const over = (hiP != null && pct > hiP) || (loP != null && pct < loP);
+        const markers = [];
+        if (loP != null) markers.push({ style:{ position:'absolute', top:'0', bottom:'0', left:loP+'%', width:'2px', background:'var(--err)' } });
+        if (hiP != null) markers.push({ style:{ position:'absolute', top:'0', bottom:'0', left:hiP+'%', width:'2px', background:'var(--err)' } });
+        return { name:p.name[lang], val, unit:p.unit,
+          barStyle:{ width:pct+'%', height:'100%', background: over?'var(--err)':'var(--accent)' },
+          markers,
+          valStyle:{ fontSize:'15px', fontWeight:700, color: over?'var(--err)':'var(--fg)' } };
+      });
+      return { isStream:true, rows };
+    }
+    if (bl.type === 'status'){
+      const rows = [
+        {k:{ru:'Клемма 15',en:'Terminal 15'}, label:{ru:'ВКЛ',en:'ON'}, color:'var(--ok)'},
+        {k:{ru:'Связь с блоком',en:'Comm link'}, label:{ru:'УСТАНОВЛЕНА',en:'ESTABLISHED'}, color:'var(--ok)'},
+        {k:{ru:'Кодирование',en:'Coding'}, label:{ru:'КОРРЕКТНО',en:'VALID'}, color:'var(--ok)'},
+        {k:{ru:'Память ошибок',en:'Fault memory'}, label: em.faults?{ru:em.faults+' зап.',en:em.faults+' entr.'}:{ru:'пусто',en:'empty'}, color: em.faults?'var(--warn)':'var(--ok)'}
+      ];
+      return { isStatus:true, rows: rows.map(r => ({ k:r.k[lang], label:r.label[lang], color:r.color })) };
+    }
+    return { isNote:true, text:'' };
+  }
+
+  resolveKey(k, f, lang){
+    const base = { display:'flex', flexDirection:'column', alignItems:'flex-start', justifyContent:'center', gap:'3px',
+      flex:'1 1 0', minWidth:0, padding:'8px 11px', height:'46px', border:'1px solid var(--stroke)', borderRadius:'3px',
+      background:'var(--panel-2)', color:'var(--fg)', fontFamily:'inherit', cursor:'pointer', textAlign:'left' };
+    if (!k) return { f, blank:true, label:'', onClick:()=>{}, style: Object.assign({}, base, { background:'transparent', opacity:0.3, cursor:'default' }),
+      tagStyle:{ fontSize:'9px', fontWeight:700, color:'var(--fg-faint)' } };
+    let onClick, tag;
+    if (k.to){ onClick=()=>this.pushPage(k.to); tag='var(--accent)'; }
+    else if (k.back){ onClick=()=>this.popPage(); tag='var(--fg-faint)'; }
+    else if (k.exit){ onClick=()=>this.exitSession(); tag='var(--fg-faint)'; }
+    else if (k.action==='read'){ onClick=()=>this.setState({faultsRead:true,faultsCleared:false}); tag='var(--ok)'; }
+    else if (k.action==='clear'){ onClick=()=>this.setState({faultsCleared:true}); tag='var(--warn)'; }
+    else { onClick=()=>{}; tag='var(--fg-dim)'; }
+    return { f, blank:false, label:k.label[lang], onClick, style:base, tagStyle:{ fontSize:'9px', fontWeight:700, letterSpacing:'0.06em', color:tag } };
+  }
+
+  selectSeries(id){
+    const first = this.DATA.find(d => d.s === id);
+    this.setState({ series:id, query:'', chassis: first ? first.code : null, body: first ? first.bodies[0] : null });
+  }
+
+  renderVals(){
+    const { theme, lang, series, chassis, body, query, clock, vbat } = this.state;
+    const t = this.STR[lang];
+    const bn = this.BODY[lang];
+    const q = query.trim().toUpperCase();
+
+    const dot = c => ({ width:'8px', height:'8px', borderRadius:'50%', background:c, flex:'none', display:'inline-block' });
+
+    // segmented controls
+    const seg = on => ({ padding:'6px 11px', fontFamily:'inherit', fontSize:'11px', fontWeight: on?700:500,
+      letterSpacing:'0.06em', border:'none', cursor:'pointer',
+      background: on?'var(--panel-2)':'transparent', color: on?'var(--accent)':'var(--fg-dim)' });
+
+    // series list
+    const counts = {};
+    this.SERIES.forEach(s => counts[s.id] = this.DATA.filter(d => d.s === s.id).length);
+    const serStyle = on => ({ display:'flex', alignItems:'center', gap:'8px', padding:'8px 12px 8px 9px',
+      cursor:'pointer', background: on?'var(--accent-tint)':'transparent',
+      borderLeft:'3px solid '+(on?'var(--accent)':'transparent'), color: on?'var(--fg)':'var(--fg-dim)', fontFamily:'inherit' });
+    const seriesList = this.SERIES.map(s => ({
+      id:s.id, label:s.label, name:this.SNAME[lang][s.id], count:counts[s.id],
+      style: serStyle(!q && s.id === series),
+      onClick: () => this.selectSeries(s.id)
+    }));
+
+    // chassis grid
+    let list = q
+      ? this.DATA.filter(d => d.code.toUpperCase().includes(q) || d.ru.toUpperCase().includes(q) || d.en.toUpperCase().includes(q))
+      : this.DATA.filter(d => d.s === series);
+
+    const cardStyle = on => ({ display:'flex', flexDirection:'column', gap:'3px', padding:'10px 11px',
+      textAlign:'left', cursor:'pointer', background: on?'var(--accent-tint)':'var(--panel)',
+      border:'1px solid '+(on?'var(--accent)':'var(--stroke)'), borderRadius:'3px', color:'var(--fg)',
+      fontFamily:'inherit', minHeight:'106px' });
+    const chassisList = list.map(d => ({
+      code:d.code, model:d[lang], years:d.years, bodiesStr:d.bodies.join('·'), ecus:d.ecus,
+      style: cardStyle(d.code === chassis),
+      onClick: () => this.setState({ chassis:d.code, body:d.bodies[0] }),
+      onOpen: () => this.openChassis(d.code)
+    }));
+
+    // detail
+    const sel = this.DATA.find(d => d.code === chassis) || null;
+    let detail = null;
+    if (sel){
+      const chipStyle = on => ({ display:'inline-flex', alignItems:'center', padding:'6px 9px',
+        border:'1px solid '+(on?'var(--accent)':'var(--stroke-2)'), background: on?'var(--accent)':'transparent',
+        color: on?'var(--accent-fg)':'var(--fg-dim)', borderRadius:'3px', cursor:'pointer', fontFamily:'inherit', fontSize:'11px' });
+      const activeBody = body || sel.bodies[0];
+      detail = {
+        code:sel.code, model:sel[lang], years:sel.years, drive:sel.drive.join(' / '), ecus:sel.ecus, engines:sel.eng,
+        statusLabel: t['st_'+sel.status],
+        statusStyle: { fontSize:'10px', letterSpacing:'0.1em', color:this.STCOLOR[sel.status], fontWeight:500 },
+        dotStyle: dot(this.STCOLOR[sel.status]),
+        barStyle: { height:'100%', width: Math.round(sel.ecus/44*100)+'%', background:'var(--accent)' },
+        bodyChips: sel.bodies.map(b => ({
+          code:b, label:bn[b]||b, style: chipStyle(b === activeBody),
+          onClick: () => this.setState({ body:b })
+        }))
+      };
+    }
+
+    // ---- ECU screen ----
+    const view = this.state.view;
+    const scanning = this.state.scanState === 'scanning';
+    const scanPct = this.state.scanPct;
+    const fullMods = this.modsFor(sel).map(m => this.enrich(m));
+    const catCount = {}; fullMods.forEach(m => catCount[m.cat] = (catCount[m.cat]||0) + 1);
+    const faultCount = fullMods.filter(m => m.status === 'fault').length;
+
+    const scColor = st => st === 'ok' ? 'var(--ok)' : (st === 'fault' ? 'var(--warn)' : 'var(--faint-dot)');
+    const catRow = on => ({ display:'flex', alignItems:'center', gap:'8px', padding:'8px 12px 8px 9px', cursor:'pointer',
+      background: on?'var(--accent-tint)':'transparent', borderLeft:'3px solid '+(on?'var(--accent)':'transparent'),
+      color: on?'var(--fg)':'var(--fg-dim)', fontFamily:'inherit' });
+    const ecuCat = this.state.ecuCat;
+    const ecuCatList = [{ id:'ALL', label:t.all, count:fullMods.length, style:catRow(ecuCat==='ALL'), onClick:()=>this.setState({ecuCat:'ALL'}) }]
+      .concat(this.CATS.filter(c => catCount[c.id]).map(c => ({
+        id:c.id, label:c[lang], count:catCount[c.id], style:catRow(ecuCat===c.id), onClick:()=>this.setState({ecuCat:c.id})
+      })));
+
+    const catName = {}; this.CATS.forEach(c => catName[c.id] = c[lang]);
+    const disp = ecuCat === 'ALL' ? fullMods : fullMods.filter(m => m.cat === ecuCat);
+    const rowStyle = on => ({ display:'grid', gridTemplateColumns:'14px 62px 1fr 58px 46px 78px', gap:'8px', alignItems:'center',
+      padding:'9px 12px 9px 10px', cursor:'pointer', borderLeft:'2px solid '+(on?'var(--accent)':'transparent'),
+      borderBottom:'1px solid var(--stroke)', background: on?'var(--accent-tint)':'transparent', fontFamily:'inherit' });
+    let lastCat = null;
+    const moduleItems = disp.map(m => {
+      const on = m.code === this.state.ecu;
+      const header = (ecuCat === 'ALL' && m.cat !== lastCat) ? catName[m.cat] : null;
+      lastCat = m.cat;
+      let stLabel, stColor;
+      if (scanning){ stLabel = '···'; stColor = 'var(--fg-faint)'; }
+      else if (m.status === 'fault'){ stLabel = m.faults + ' DTC'; stColor = 'var(--warn)'; }
+      else if (m.status === 'nolink'){ stLabel = t.st_nolink; stColor = 'var(--faint-dot)'; }
+      else { stLabel = 'OK'; stColor = 'var(--ok)'; }
+      return {
+        code:m.code, name:m[lang], bus:m.bus, addr:m.addr, header,
+        dotStyle:{ width:'8px', height:'8px', borderRadius:'50%', background: scanning?'var(--fg-faint)':scColor(m.status), flex:'none' },
+        stLabel, stStyle:{ fontSize:'10px', letterSpacing:'0.04em', color:stColor, textAlign:'right', fontWeight:500 },
+        style: rowStyle(on),
+        onClick: () => this.setState({ ecu:m.code }),
+        onOpen: () => this.connect(m.code)
+      };
+    });
+
+    const em = fullMods.find(m => m.code === this.state.ecu) || null;
+    let ecuDetail = null;
+    if (em){
+      const dtcs = [];
+      for (let i=0;i<em.faults;i++){ const h=(em.hash*(i+7))%65536; dtcs.push(h.toString(16).toUpperCase().padStart(4,'0')); }
+      let stLabel, stColor;
+      if (em.status === 'fault'){ stLabel = em.faults + ' ' + t.dtc; stColor = 'var(--warn)'; }
+      else if (em.status === 'nolink'){ stLabel = t.st_nolink; stColor = 'var(--faint-dot)'; }
+      else { stLabel = 'OK'; stColor = 'var(--ok)'; }
+      ecuDetail = {
+        code:em.code, name:em[lang], cat:catName[em.cat], bus:em.bus, addr:em.addr,
+        part:'6512 ' + String(em.hash%10000).padStart(4,'0'),
+        ver:'SW 0x' + (em.hash%256).toString(16).toUpperCase().padStart(2,'0') + ' · HW 0x' + ((em.hash>>4)%256).toString(16).toUpperCase().padStart(2,'0'),
+        statusLabel:stLabel, statusStyle:{ fontSize:'11px', letterSpacing:'0.06em', color:stColor, fontWeight:500 },
+        dotStyle:{ width:'9px', height:'9px', borderRadius:'50%', background:stColor, flex:'none' },
+        isFault: em.status === 'fault', isNolink: em.status === 'nolink', dtcs
+      };
+    }
+
+    const bodyName = sel ? (this.BODY[lang][this.state.body] || this.BODY[lang][sel.bodies[0]] || sel.bodies[0]) : '';
+    const ctxLabel = sel ? (sel.code + ' · ' + sel[lang] + ' · ' + bodyName) : '';
+
+    // ---- Session (config-driven, one template for all ECUs) ----
+    const inSession = view === 'session';
+    const sesCtx = (sel && em) ? (sel.code + ' · ' + em.code + ' · ' + em[lang]) : '';
+    let ses = null;
+    if (inSession && em){
+      const screens = this.screensFor(em);
+      const stack = (this.state.sesStack && this.state.sesStack.length) ? this.state.sesStack : ['main'];
+      const page = screens[stack[stack.length-1]] || screens.main;
+      const path = stack.map(id => (screens[id] ? screens[id].title[lang] : id)).join('   ›   ');
+      const blocks = page.blocks.map(bl => { const r = this.resolveBlock(bl, em, lang); r.wrapStyle = { flex:'0 0 auto' }; return r; });
+      const keys = [];
+      for (let f=1; f<=6; f++){ keys.push(this.resolveKey((page.keys||[]).find(x => x.f === f), f, lang)); }
+      ses = { title: page.title[lang], path, cfg: em.code.toLowerCase().replace('/','')+'.ecu', blocks, keys };
+    }
+
+    return {
+      theme, t, vbat, clock, query,
+      seriesList, chassisList, resultsCount: list.length,
+      detail, hasSel: !!detail, noSel: !detail,
+      onQuery: e => this.setState({ query: e.target.value }),
+      setRu: () => this.setState({ lang:'ru' }),
+      setEn: () => this.setState({ lang:'en' }),
+      setDark: () => this.setState({ theme:'dark' }),
+      setLight: () => this.setState({ theme:'light' }),
+      langRuStyle: seg(lang === 'ru'), langEnStyle: seg(lang === 'en'),
+      thDarkStyle: seg(theme === 'dark'), thLightStyle: seg(theme === 'light'),
+      view, inChassis: view === 'chassis', inEcu: view === 'ecu', inSession,
+      goEcu: () => this.goEcu(),
+      goChassis: () => this.setState({ view:'chassis' }),
+      ctxLabel, ses, sesCtx,
+      onConnect: () => this.connect(this.state.ecu),
+      exitSession: () => this.exitSession(),
+      ecuCatList, moduleItems, moduleCount: fullMods.length, faultCount,
+      faultCountPos: faultCount > 0 && !scanning,
+      scanning, notScanning: !scanning, scanPctNum: Math.round(scanPct),
+      scanPctStyle: { height:'100%', width: (scanning ? scanPct : 0) + '%', background:'var(--accent)' },
+      onScan: () => this.startScan(),
+      ecuDetail, hasEcuSel: !!ecuDetail, noEcuSel: !ecuDetail
+    };
+  }
+}
+</script>
+</body>
+</html>

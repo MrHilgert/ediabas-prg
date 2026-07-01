@@ -88,6 +88,53 @@ pub struct PrgHeader {
     pub ptr_sgbd: u32,
 }
 
+/// Parse one table data block (already XOR-decoded): leading uppercase/digit/`_`
+/// strings are the column header, then null-separated cells grouped by column
+/// count are the rows. Stops at a non-printable byte or the block end.
+fn parse_table_block(block: &[u8]) -> Option<Table> {
+    let mut offset = 0usize;
+    let mut columns: Vec<String> = Vec::new();
+    while offset < block.len() {
+        let (s, next) = read_cstring_at(block, offset);
+        if s.is_empty() || !is_col_name(&s) {
+            break;
+        }
+        columns.push(s);
+        offset = next;
+    }
+    let n_cols = columns.len();
+    if n_cols == 0 {
+        return None;
+    }
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut cur: Vec<String> = Vec::new();
+    while offset < block.len() {
+        let b = block[offset];
+        if b > 127 || (b < 32 && b != 0) {
+            break;
+        }
+        let (s, next) = read_cstring_at(block, offset);
+        cur.push(s);
+        if cur.len() == n_cols {
+            rows.push(std::mem::take(&mut cur));
+        }
+        offset = next;
+    }
+    Some(Table { columns, rows })
+}
+
+/// Parse a hex code string, tolerating an optional `0x`/`0X` prefix and
+/// leading zeros. Returns `None` for non-hex (e.g. free text) so string
+/// comparison stays authoritative for text columns.
+fn parse_hexish(s: &str) -> Option<u64> {
+    let t = s.trim();
+    let t = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    if t.is_empty() || t.len() > 16 || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(t, 16).ok()
+}
+
 /// A single SGBD lookup table loaded from the data section.
 #[derive(Debug, Default, Clone)]
 pub struct Table {
@@ -101,8 +148,16 @@ impl Table {
     }
 
     pub fn find_row(&self, col_idx: usize, value: &str) -> Option<usize> {
+        // EDIABAS code tables store keys as `0x1E00` (uppercase, `0x`-prefixed,
+        // byte-width zero-padded), while the search key comes from `fix2hex`
+        // (bare `1E00`, minimal width). Match case-insensitively first, then fall
+        // back to hex-numeric equivalence so `1E00`==`0x1E00` and `500`==`0x0500`.
+        let want = parse_hexish(value);
         self.rows.iter().position(|r| {
-            r.get(col_idx).map_or(false, |v| v.eq_ignore_ascii_case(value))
+            r.get(col_idx).map_or(false, |v| {
+                v.eq_ignore_ascii_case(value)
+                    || matches!((want, parse_hexish(v)), (Some(a), Some(b)) if a == b)
+            })
         })
     }
 
@@ -165,80 +220,62 @@ impl PrgFile {
     pub fn parse_tables(&self) -> std::collections::HashMap<String, Table> {
         let mut map = std::collections::HashMap::new();
 
-        let ptr_jobs    = self.header.ptr_jobs    as usize;
-        let ptr_results = self.header.ptr_results as usize;
-        if ptr_results <= ptr_jobs || ptr_results > self.data.len() {
+        let ptr_jobs   = self.header.ptr_jobs    as usize;
+        let dir_start  = self.header.ptr_results as usize; // [0x84] = table directory
+        let ptr_sgbd   = self.header.ptr_sgbd    as usize;
+        let end_region = ptr_sgbd.min(self.data.len());
+        if dir_start <= ptr_jobs || dir_start >= end_region {
             return map;
         }
 
         let jobs_count = self.job_count();
         let jobs_end   = ptr_jobs + 4 + jobs_count * JOB_ENTRY_SIZE;
-        if jobs_end + 8 >= ptr_results {
+        if jobs_end >= dir_start {
             return map;
         }
 
-        // XOR-decode the whole data section once
-        let raw_section = &self.data[jobs_end..ptr_results];
-        let section = xor_decode(raw_section);
+        // XOR-decode the span holding the table DATA blocks and the DIRECTORY that
+        // indexes them, so an absolute file offset `abs` maps to `decoded[abs - jobs_end]`.
+        let decoded = xor_decode(&self.data[jobs_end..end_region]);
+        let at = |abs: usize| abs - jobs_end;
 
-        // Data starts 8 bytes in (skip 8-byte null header)
-        let mut offset = 8usize;
-
-        // Step 1 – read column header (uppercase/digit/underscore strings)
-        let mut columns: Vec<String> = Vec::new();
-        while offset < section.len() {
-            let (s, next) = read_cstring_at(&section, offset);
-            if s.is_empty() || !is_col_name(&s) {
-                break;
-            }
-            columns.push(s);
-            offset = next;
-        }
-        if columns.is_empty() {
-            return map;
-        }
-        let n_cols = columns.len();
-
-        // Step 2 – read data rows until we hit non-printable bytes (directory)
-        let mut rows: Vec<Vec<String>> = Vec::new();
-        let mut cur_row: Vec<String> = Vec::new();
-        while offset < section.len() {
-            // Peek at next byte; non-printable means we hit the binary directory
-            if section[offset] > 127 || (section[offset] < 32 && section[offset] != 0) {
-                break;
-            }
-            let (s, next) = read_cstring_at(&section, offset);
-            cur_row.push(s);
-            if cur_row.len() == n_cols {
-                rows.push(std::mem::take(&mut cur_row));
-            }
-            offset = next;
-        }
-
-        // Build the main table (always present; named "BETRIEBSWTAB" in DDE40*)
-        let main_table = Table { columns: columns.clone(), rows };
-        // Register it under common aliases
-        map.insert("BETRIEBSWTAB".into(), main_table.clone());
-
-        // Step 3 – parse the binary directory to register other table names
-        // Each 80-byte entry: [0-7] flags, [8-11] count, [12-43] 32-byte name,
-        // [44-75] zeros, [76-79] data_ptr (abs file offset, currently unused).
-        //
-        // For now we only have one data block, so every table name in the
-        // directory maps to the same Table object (the one we just parsed).
-        let dir_start = offset;
-        let mut d = dir_start;
-        while d + 80 <= section.len() {
-            // Name starts at byte 12 within the 80-byte entry
-            let name_slice = &section[d + 12..d + 44];
-            let end = name_slice.iter().position(|&b| b == 0).unwrap_or(32);
-            let name_bytes = &name_slice[..end];
-            if name_bytes.is_empty() || !name_bytes.iter().all(|&b| b > 32 && b < 128) {
+        // 1) Directory: 80-byte entries — name (32B) @+0x04, data_ptr (abs offset) @+0x44.
+        //    (Verified: BETRIEBSWTAB.data_ptr == jobs_end + 8.)
+        const ENTRY: usize = 80;
+        let mut entries: Vec<(String, usize)> = Vec::new();
+        let mut e = dir_start;
+        while e + ENTRY <= end_region {
+            let base = at(e);
+            let name_bytes = &decoded[base + 4..base + 4 + 32];
+            let nlen = name_bytes.iter().position(|&b| b == 0).unwrap_or(32);
+            let name = &name_bytes[..nlen];
+            if name.is_empty() || !name.iter().all(|&b| b > 32 && b < 127) {
                 break; // end of directory
             }
-            let table_name = String::from_utf8_lossy(name_bytes).to_string();
-            map.entry(table_name).or_insert_with(|| main_table.clone());
-            d += 80;
+            let dp = read_u32_le(&decoded, base + 0x44) as usize;
+            let name = String::from_utf8_lossy(name).to_uppercase();
+            if dp >= jobs_end && dp < dir_start {
+                entries.push((name, dp));
+            }
+            e += ENTRY;
+        }
+        if entries.is_empty() {
+            return map;
+        }
+
+        // 2) Each table's data runs from its data_ptr to the next data_ptr (or the
+        //    directory start for the last block) — parse columns then rows per block.
+        let mut ptrs: Vec<usize> = entries.iter().map(|(_, p)| *p).collect();
+        ptrs.sort_unstable();
+        ptrs.dedup();
+        for (name, dp) in &entries {
+            let end = ptrs.iter().copied().find(|&p| p > *dp).unwrap_or(dir_start);
+            if end <= *dp || at(end) > decoded.len() {
+                continue;
+            }
+            if let Some(t) = parse_table_block(&decoded[at(*dp)..at(end)]) {
+                map.entry(name.clone()).or_insert(t);
+            }
         }
 
         map

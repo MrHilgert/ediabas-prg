@@ -1,0 +1,16 @@
+[package]
+name = "ediag-gui"
+version = "0.1.0"
+edition = "2021"
+description = "eDIAG — modern INPA-style GUI on top of the `ediabas` crate"
+
+[[bin]]
+name = "ediag"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.29"
+egui   = "0.29"
+# The diagnostic engine (Session / jobs / transport / VM).
+# Package is `ediabas-prg`; its [lib] is named `ediabas`.
+ediabas = { path = "..", package = "ediabas-prg" }

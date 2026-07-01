@@ -247,7 +247,7 @@ impl Vm {
                 // move [DST_REG + IDX_REG], SRC_BYTE: 00 a2 DST IDX SRC (5 bytes)
                 // MODE=0xa2: upper=0xa(IdxReg dst), lower=0x2(RegAB src)
                 [0x00, 0xa2, dst_reg, idx_reg, src_b, ..] => {
-                    let idx = self.regs.get(idx_reg).map(Value::as_long).unwrap_or(0) as usize;
+                    let idx = reg_val_from_map(&self.regs, *idx_reg).max(0) as usize;
                     let byte_val = self.get_byte_reg(*src_b);
                     let mut data = match self.regs.get(dst_reg) {
                         Some(Value::Data(d)) => d.clone(),
@@ -265,7 +265,7 @@ impl Vm {
                 // Copies the source string/data bytes into the dst buffer at byte offset idx
                 // (used to splice converted selectors into a telegram being built).
                 [0x00, 0xa1, dst_reg, idx_reg, src_s, ..] => {
-                    let idx = self.regs.get(idx_reg).map(Value::as_long).unwrap_or(0) as usize;
+                    let idx = reg_val_from_map(&self.regs, *idx_reg).max(0) as usize;
                     let src_bytes = self.reg_bytes(src_s);
                     let mut data = match self.regs.get(dst_reg) {
                         Some(Value::Data(d)) => d.clone(),
@@ -424,7 +424,7 @@ impl Vm {
 
                 // adds [BaseReg+IdxReg], ByteReg: 04 a2 base idx src (MODE=0xa2)
                 [0x04, 0xa2, base, idx_reg, src_b, ..] => {
-                    let idx = self.regs.get(idx_reg).map(Value::as_long).unwrap_or(0) as usize;
+                    let idx = reg_val_from_map(&self.regs, *idx_reg).max(0) as usize;
                     let src_byte = self.get_byte_reg(*src_b);
                     let mut data = match self.regs.get(base) {
                         Some(Value::Data(d)) => d.clone(),
@@ -772,7 +772,10 @@ impl Vm {
 
                 // ── string operations ─────────────────────────────────────────
 
-                // scmp — compare strings: sets L0 = strcmp(R1,R2); 20 11 R1 R2
+                // scmp — compare strings, FLAGS ONLY (like `comp`): 20 11 R1 R2.
+                // Must NOT write a register — the result value variant is `strcmp` (0x8f).
+                // Writing L0 here clobbers a read offset held in I0/L0 across the compare
+                // (broke STATUS_* jobs: the DATA_TYPE switch reset the response byte index).
                 [0x20, ..] if ip + 1 < code.len() => {
                     let mode = code[ip + 1];
                     let hi = mode >> 4;
@@ -782,8 +785,9 @@ impl Vm {
                     pos = p1;
                     let (s2, p2) = read_str_at(&self.regs, lo, code, pos);
                     let result = s1.cmp(&s2) as i32;
-                    self.regs.insert(REG_L0, Value::Long(result));
-                    self.flags.zero = result == 0;
+                    self.flags.zero  = result == 0;
+                    self.flags.minus = result < 0;
+                    self.flags.carry = result < 0;
                     ip = p2;
                 }
 
@@ -864,7 +868,7 @@ impl Vm {
                         }
                         0xa => { // IdxReg: base + reg idx
                             let r = g(pos);
-                            let idx = self.regs.get(&g(pos + 1)).map(Value::as_long).unwrap_or(0).max(0) as usize;
+                            let idx = reg_val_from_map(&self.regs, g(pos + 1)).max(0) as usize;
                             pos += 2; (r, Some(idx))
                         }
                         _ => { pos += nibble_size(hi, code, pos); (0xff, None) }
@@ -1009,7 +1013,9 @@ impl Vm {
                     } else {
                         s.parse().unwrap_or(0)
                     };
-                    if dst != 0xff { self.regs.insert(dst, Value::Long(v)); }
+                    // Honour the B/I→L register overlap for numeric dst (e.g. tabget
+                    // into I1); write_reg_val stores S/L regs directly as before.
+                    if dst != 0xff { self.write_reg_val(dst, v); }
                     ip = p2;
                 }
 
@@ -1163,7 +1169,8 @@ impl Vm {
                     if ip + total <= code.len() {
                         let name = cstr(&code[ip + 4..ip + 4 + n]);
                         let reg = code[ip + 4 + n];
-                        let v = self.regs.get(&reg).map(Value::as_long).unwrap_or(0) & 0xffff;
+                        // Honour the B/I → L register overlap: I/B regs have no own key.
+                        let v = reg_val_from_map(&self.regs, reg) & 0xffff;
                         current.insert(name, Value::Long(v));
                     }
                     ip += 4 + n + 1;
@@ -1176,7 +1183,7 @@ impl Vm {
                     if ip + total <= code.len() {
                         let name = cstr(&code[ip + 4..ip + 4 + n]);
                         let reg = code[ip + 4 + n];
-                        let v = self.regs.get(&reg).map(Value::as_long).unwrap_or(0);
+                        let v = reg_val_from_map(&self.regs, reg);
                         current.insert(name, Value::Long(v));
                     }
                     ip += 4 + n + 1;
@@ -1189,7 +1196,7 @@ impl Vm {
                     if ip + total <= code.len() {
                         let name = cstr(&code[ip + 4..ip + 4 + n]);
                         let reg = code[ip + 4 + n];
-                        let v = self.regs.get(&reg).map(Value::as_long).unwrap_or(0);
+                        let v = reg_val_from_map(&self.regs, reg);
                         current.insert(name, Value::Long(v));
                     }
                     ip += total;
@@ -1254,7 +1261,7 @@ impl Vm {
                     if ip + total <= code.len() {
                         let name = cstr(&code[ip + 4..ip + 4 + n]);
                         let reg = code[ip + 4 + n];
-                        let v = self.regs.get(&reg).map(Value::as_long).unwrap_or(0);
+                        let v = reg_val_from_map(&self.regs, reg);
                         current.insert(name, Value::Long(v));
                     }
                     ip += total;

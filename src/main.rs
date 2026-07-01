@@ -57,6 +57,9 @@ enum Command {
         /// Read by the job via par*/pary. Optional even if the job expects args.
         #[arg(long, value_name = "A;B;C")]
         args: Option<String>,
+        /// Poll the job N times in one session (after init) and report timing/FPS.
+        #[arg(long, default_value = "1")]
+        repeat: u32,
     },
 
     /// Send a K-line telegram via KDCAN STD:OBD adapter protocol
@@ -135,6 +138,29 @@ enum Command {
         /// Frame bytes to send (hex), e.g. "B8 12 F1 04 2C 10 0F 10"
         frame: String,
     },
+    /// KWP2000 DynamicallyDefinedLocalIdentifier (2C 10) define-once benchmark:
+    /// define the PID list ONCE, then poll with a bare `2C 10` N times and report FPS.
+    Fastpoll {
+        #[arg(short, long)]
+        port: String,
+        #[arg(short, long, default_value = "9600")]
+        baud: u32,
+        /// ECU target address (hex), e.g. 12 for DDE4.0
+        #[arg(long, default_value = "12")]
+        ecu: String,
+        /// Concatenated 2-byte PIDs (hex), e.g. "0F100F650F30..."
+        #[arg(long)]
+        pids: String,
+        /// Number of bare-poll iterations to time.
+        #[arg(long, default_value = "200")]
+        repeat: u32,
+        /// Inter-byte TX delay (ms). DDE4.0 needs ~4-5ms.
+        #[arg(long, default_value = "4")]
+        interbyte: u64,
+        /// Per-poll frame timeout (ms) — low value = fast dropped-frame detection.
+        #[arg(long, default_value = "400")]
+        timeout: u64,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -160,7 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
-        Command::Run { prg: prg_path, job, port, baud, kline_init, init_job, echo, len_offset, interbyte, args } => {
+        Command::Run { prg: prg_path, job, port, baud, kline_init, init_job, echo, len_offset, interbyte, args, repeat } => {
             let arg_buf: Vec<u8> = args.unwrap_or_default().into_bytes();
             let prg_file = prg::PrgFile::open(&prg_path).unwrap_or_else(|e| {
                 eprintln!("Error opening .prg: {e}"); std::process::exit(1);
@@ -217,7 +243,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         });
                     }
 
-                    vm.run_job(&code).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+                    if repeat > 1 {
+                        // Steady-state FPS benchmark: poll the measurement job N times in
+                        // one session (init already done). Discard result sets, time each.
+                        let mut times = Vec::with_capacity(repeat as usize);
+                        let mut last = Vec::new();
+                        let mut errors = 0u32;
+                        let bench_start = std::time::Instant::now();
+                        for _ in 0..repeat {
+                            let t0 = std::time::Instant::now();
+                            match vm.run_job(&code) {
+                                Ok(sets) => {
+                                    times.push(t0.elapsed().as_secs_f64() * 1000.0);
+                                    last = sets;
+                                }
+                                Err(e) => { errors += 1; eprintln!("  poll err: {e}"); }
+                            }
+                        }
+                        let wall = bench_start.elapsed().as_secs_f64();
+                        if times.is_empty() {
+                            eprintln!("all {repeat} polls failed"); std::process::exit(1);
+                        }
+                        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let n = times.len();
+                        let sum: f64 = times.iter().sum();
+                        let avg = sum / n as f64;
+                        let min = times[0];
+                        let max = times[n - 1];
+                        let med = times[n / 2];
+                        eprintln!(
+                            "\n--- FPS benchmark: {n} ok / {errors} err, {} values ---\n\
+                             per-poll  min {:.1} ms  median {:.1} ms  avg {:.1} ms  max {:.1} ms\n\
+                             throughput  {:.2} FPS (avg)   {:.2} FPS (wall {:.2}s incl. {errors} err)",
+                            last.iter().map(|s| s.len()).sum::<usize>(),
+                            min, med, avg, max,
+                            1000.0 / avg, n as f64 / wall, wall,
+                        );
+                        last
+                    } else {
+                        vm.run_job(&code).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+                    }
                 }
                 None => {
                     let mut vm = vm::Vm::new(Box::new(transport::sim::NullTransport), tables);
@@ -395,6 +460,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             eprintln!("RX ({} bytes): {}", raw.len(), fmt_hex(&raw));
             analyze_ds2_frame(&raw);
+            Ok(())
+        }
+        Command::Fastpoll { port, baud, ecu, pids, repeat, interbyte, timeout } => {
+            let ecu_addr = u8::from_str_radix(ecu.trim_start_matches("0x"), 16)
+                .map_err(|_| "bad --ecu hex")?;
+            let pid_bytes = parse_hex(&pids).ok_or("invalid --pids hex")?;
+            if pid_bytes.is_empty() || pid_bytes.len() % 2 != 0 {
+                return Err("--pids must be whole 2-byte PIDs".into());
+            }
+            let n_pids = pid_bytes.len() / 2;
+
+            let serial = driver::serial::SerialDriver::open_parity(&port, baud, serialport::Parity::Even)
+                .map_err(|e| format!("Cannot open {port}: {e}"))?;
+            let mut ds2 = transport::ds2::Ds2Transport::new(Box::new(serial));
+            ds2.echo = true;
+            // DDE4.0 = concept 0x0006: 4-byte header, LEN@3, len_add=5.
+            let cfg = ediabas::config::CommConfig {
+                len_offset: 3, len_add: 5, timeout_std_ms: timeout,
+                interbyte_ms: interbyte, ..Default::default()
+            };
+            ds2.configure(&cfg)?;
+            eprintln!("Fastpoll {port} @ {baud} even, ecu={ecu_addr:#04x}, {n_pids} PIDs, interbyte={interbyte}ms, timeout={timeout}ms");
+
+            // --- Step 1: define the dynamic list ONCE (2C 10 + all PIDs) ---
+            let mut def_frame = vec![0xB8, ecu_addr, 0xF1, (2 + pid_bytes.len()) as u8, 0x2C, 0x10];
+            def_frame.extend_from_slice(&pid_bytes);
+            eprintln!("DEFINE TX: {}", fmt_hex(&def_frame));
+            match ds2.exchange(&def_frame) {
+                Ok(r)  => eprintln!("DEFINE RX ({} b): {}", r.len(), fmt_hex(&r)),
+                Err(e) => { eprintln!("DEFINE failed: {e}"); std::process::exit(1); }
+            }
+
+            // --- Step 2: bare `2C 10` poll loop (no PIDs) ---
+            let poll_frame = [0xB8, ecu_addr, 0xF1, 0x02, 0x2C, 0x10];
+            eprintln!("POLL TX:   {}\n", fmt_hex(&poll_frame));
+            let mut times = Vec::with_capacity(repeat as usize);
+            let mut errors = 0u32;
+            let mut last = Vec::new();
+            let bench = std::time::Instant::now();
+            for _ in 0..repeat {
+                let t0 = std::time::Instant::now();
+                match ds2.exchange(&poll_frame) {
+                    Ok(r)  => { times.push(t0.elapsed().as_secs_f64() * 1000.0); last = r; }
+                    Err(e) => { errors += 1; eprintln!("  poll err: {e}"); }
+                }
+            }
+            let wall = bench.elapsed().as_secs_f64();
+            if times.is_empty() { eprintln!("all polls failed"); std::process::exit(1); }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let n = times.len();
+            let avg: f64 = times.iter().sum::<f64>() / n as f64;
+            eprintln!("LAST RX ({} b): {}", last.len(), fmt_hex(&last));
+            let sid_ok = last.get(4) == Some(&0x6C) && last.get(5) == Some(&0x10);
+            eprintln!(
+                "\n--- define-once FPS: {n} ok / {errors} err ---\n\
+                 response SID 6C 10 present: {sid_ok}  (list held between polls)\n\
+                 per-poll  min {:.1} ms  median {:.1} ms  avg {:.1} ms  max {:.1} ms\n\
+                 throughput  {:.2} FPS (avg)   {:.2} FPS (wall {:.2}s)",
+                times[0], times[n / 2], avg, times[n - 1],
+                1000.0 / avg, n as f64 / wall, wall,
+            );
             Ok(())
         }
     };

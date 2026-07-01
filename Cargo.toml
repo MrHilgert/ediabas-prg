@@ -1,3 +1,6 @@
+[workspace]
+members = ["gui"]
+
 [package]
 name = "ediabas-prg"
 version = "0.1.0"

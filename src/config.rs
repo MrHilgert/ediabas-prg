@@ -23,6 +23,9 @@ pub struct CommConfig {
     pub timeout_std_ms: u64,
     pub regen_time_ms:  u64,
     pub timeout_tel_ms: u64,
+    /// Inter-byte TX delay (ms). DDE4.0 and classic DS2 ECUs ignore frames sent
+    /// without ~4-5 ms spacing between bytes (ParInterbyteTime). 0 = send at once.
+    pub interbyte_ms:   u64,
     pub wake_addr:      Option<u8>,
 }
 
@@ -37,6 +40,7 @@ impl Default for CommConfig {
             timeout_std_ms: 2000,
             regen_time_ms:  20,
             timeout_tel_ms: 50,
+            interbyte_ms:   5,
             wake_addr:      None,
         }
     }

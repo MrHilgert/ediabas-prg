@@ -41,6 +41,8 @@ pub enum Value {
     Long(i32),
     Str(String),
     Data(Vec<u8>),
+    /// BEST/2 float register (stored in S-registers). 64-bit double.
+    Float(f64),
 }
 
 impl Value {
@@ -48,6 +50,7 @@ impl Value {
         match self {
             Value::Long(v) => *v,
             Value::Str(s) => s.trim().parse().unwrap_or(0),
+            Value::Float(f) => *f as i32,
             Value::Data(_) => 0,
         }
     }
@@ -63,7 +66,7 @@ impl Value {
         match self {
             Value::Data(d) => d,
             Value::Str(s) => s.as_bytes(),
-            Value::Long(_) => &[],
+            Value::Long(_) | Value::Float(_) => &[],
         }
     }
 }
@@ -74,7 +77,24 @@ impl std::fmt::Display for Value {
             Value::Long(v) => write!(f, "{v}"),
             Value::Str(s) => write!(f, "{s}"),
             Value::Data(d) => write!(f, "{}", hex(d)),
+            Value::Float(v) => write!(f, "{}", fmt_flt(*v)),
         }
+    }
+}
+
+/// Parse an ASCII number (BEST/2 a2flt source) to f64. Accepts ',' or '.' decimals.
+fn parse_f64(s: &str) -> f64 {
+    s.trim().replace(',', ".").parse().unwrap_or(0.0)
+}
+
+/// Format a float the way EDIABAS results read: drop trailing ".0" for integers.
+fn fmt_flt(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        format!("{}", v as i64)
+    } else {
+        let s = format!("{:.6}", v);
+        let s = s.trim_end_matches('0').trim_end_matches('.');
+        s.to_string()
     }
 }
 
@@ -94,7 +114,9 @@ struct Flags {
 
 pub struct Vm {
     regs: HashMap<u8, Value>,
-    stack: Vec<Value>,
+    /// EDIABAS value stack — byte-granular (Stack<byte>). push/pop/atsp operate
+    /// on `width` bytes little-endian, where width is the operand's data length.
+    stack: Vec<u8>,
     transport: Box<dyn Transport>,
     tables: HashMap<String, Table>,
     active_table: Option<String>,
@@ -102,6 +124,8 @@ pub struct Vm {
     flags: Flags,
     call_stack: Vec<usize>,
     comm_cfg: CommConfig,
+    /// Job argument buffer (EDIABAS ArgString), read via par*/pary opcodes.
+    args: Vec<u8>,
 }
 
 impl Vm {
@@ -116,7 +140,30 @@ impl Vm {
             flags: Flags::default(),
             call_stack: Vec::new(),
             comm_cfg: CommConfig::default(),
+            args: Vec::new(),
         }
+    }
+
+    /// Set the job argument buffer (EDIABAS ArgString) before running a job.
+    pub fn set_args(&mut self, args: Vec<u8>) {
+        self.args = args;
+    }
+
+    /// Return the ';'-separated argument segments (EDIABAS multi-arg convention).
+    fn arg_segments(&self) -> Vec<&[u8]> {
+        if self.args.is_empty() { return Vec::new(); }
+        self.args.split(|&b| b == b';').collect()
+    }
+
+    /// n-th argument (1-based) parsed as an integer, else 0.
+    fn arg_int(&self, n: usize) -> i32 {
+        let segs = self.arg_segments();
+        if n == 0 || n > segs.len() { return 0; }
+        let s = String::from_utf8_lossy(segs[n - 1]);
+        let t = s.trim();
+        i32::from_str_radix(t.trim_start_matches("0x"), 16)
+            .or_else(|_| t.parse::<i32>())
+            .unwrap_or(0)
     }
 
     pub fn run_job(&mut self, code: &[u8]) -> Result<Vec<ResultSet>, String> {
@@ -126,18 +173,48 @@ impl Vm {
         let mut current: ResultSet = HashMap::new();
         let mut sets: Vec<ResultSet> = Vec::new();
 
+        let trace = std::env::var("EDIABAS_TRACE").is_ok();
+        let mut steps: u64 = 0;
         while ip < code.len() {
             if code[ip] == 0xf7 { break; }
+
+            steps += 1;
+            if steps > 20_000_000 {
+                eprintln!("vm: instruction limit exceeded at ip={ip:#06x} — aborting (possible infinite loop)");
+                break;
+            }
+
+            if trace {
+                let end = code.len().min(ip + 6);
+                let l0 = self.regs.get(&0x18).map(Value::as_long).unwrap_or(0);
+                let l1 = self.regs.get(&0x19).map(Value::as_long).unwrap_or(0);
+                let l2 = self.regs.get(&0x1a).map(Value::as_long).unwrap_or(0);
+                eprintln!("[trace] ip={ip:#06x} op={:#04x} : {:<17} L0={l0:#x} L1={l1:#x} L2={l2:#x} sp={}",
+                          code[ip], hex(&code[ip..end]), self.stack.len());
+            }
 
             let slice = &code[ip..];
             match slice {
 
-                // ── eoj ──────────────────────────────────────────────────────────
+                // ── eoj ── end of job (opcode 0x1d always ends). An arg0 operand
+                // (mode != None) sets JOB_STATUS to that string (EDIABAS OpEoj).
                 [0x1d, 0x00, ..] => break,
-
-                [0x1d, 0x10, 0x1d, ..] => {
-                    let s = self.reg_str(REG_S1);
-                    current.insert("JOB_STATUS".into(), Value::Str(s));
+                [0x1d, mode, ..] => {
+                    match mode >> 4 {
+                        1 => {  // RegS: JOB_STATUS = string register
+                            let reg = code.get(ip + 2).copied().unwrap_or(0);
+                            let s = self.reg_str(reg);
+                            current.insert("JOB_STATUS".into(), Value::Str(s));
+                        }
+                        8 => {  // ImmStr literal
+                            let n = code.get(ip + 2).copied().unwrap_or(0) as usize
+                                  | ((code.get(ip + 3).copied().unwrap_or(0) as usize) << 8);
+                            let s = if ip + 4 + n <= code.len() { cstr(&code[ip + 4..ip + 4 + n]) }
+                                    else { String::new() };
+                            current.insert("JOB_STATUS".into(), Value::Str(s));
+                        }
+                        _ => {}
+                    }
                     break;
                 }
 
@@ -170,6 +247,16 @@ impl Vm {
                     ip += 3;
                 }
 
+                // clear RegI: 01 30 XX (3 bytes) — mode 0x30 hi=3(RegI). I overlaps L.
+                [0x01, 0x30, reg, ..] => {
+                    self.write_reg_val(*reg, 0);
+                    ip += 3;
+                }
+
+                // move with no operands (mode 0x00) — no-op, 2 bytes. Appears in real
+                // bytecode (e.g. FS_LESEN); harmless placeholder, decodes cleanly.
+                [0x00, 0x00, ..] => { ip += 2; }
+
                 // move RegS, RegS: 00 11 R1 R2
                 [0x00, 0x11, r1, r2, ..] => {
                     let v = self.regs.get(r2).cloned().unwrap_or(Value::Str(String::new()));
@@ -178,6 +265,9 @@ impl Vm {
                 }
 
                 // move RegS, ImmStr: 00 18 R NN_lo NN_hi [NN]
+                // A literal may be text ("ERROR_ARGUMENT") or a binary telegram prefix
+                // (B8 12 F1 03 2C 10). Storing binary as a Rust String corrupts non-UTF8
+                // bytes, so keep binary literals as Data (raw, byte-preserving).
                 [0x00, 0x18, reg, nn_lo, nn_hi, ..] => {
                     let n = *nn_lo as usize | ((*nn_hi as usize) << 8);
                     if ip + 5 + n > code.len() {
@@ -190,11 +280,13 @@ impl Vm {
 
                 // move RegAB, SReg[IReg]: 00 2a DST SRC IDX (5 bytes)
                 [0x00, 0x2a, dst, src, idx, ..] => {
-                    let idx_val = self.regs.get(idx).map(Value::as_long).unwrap_or(0) as usize;
-                    let byte_val = {
-                        let data = self.reg_bytes(src);
-                        data.get(idx_val).copied().unwrap_or(0)
-                    };
+                    let idx_val = reg_val_from_map(&self.regs, *idx).max(0) as usize;
+                    let data = self.reg_bytes(src);
+                    let byte_val = data.get(idx_val).copied().unwrap_or(0);
+                    if std::env::var("EDIABAS_TRACE").is_ok() {
+                        eprintln!("MOVB0 dst={:#04x} src=S{} idx={idx_val} byte={byte_val:#04x} data={:02X?}",
+                                  dst, src.wrapping_sub(0x1c), data);
+                    }
                     self.set_byte_reg(*dst, byte_val);
                     ip += 5;
                 }
@@ -206,7 +298,7 @@ impl Vm {
                     let byte_val = self.get_byte_reg(*src_b);
                     let mut data = match self.regs.get(dst_reg) {
                         Some(Value::Data(d)) => d.clone(),
-                        Some(Value::Str(s))  => s.as_bytes().to_vec(),
+                        Some(Value::Str(s))  => unlat(s),
                         _                    => Vec::new(),
                     };
                     if data.len() <= idx { data.resize(idx + 1, 0); }
@@ -215,20 +307,39 @@ impl Vm {
                     ip += 5;
                 }
 
-                // move [DST_REG + IMM_OFF], SRC_BYTE: 00 92 DST IMM SRC (5 bytes)
-                // MODE=0x92: upper=0x9(IdxImm dst), lower=0x2(RegAB src)
-                [0x00, 0x92, dst_reg, imm_off, src_b, ..] => {
-                    let idx = *imm_off as usize;
+                // move [DST_REG + IDX_REG], SRC_STRING: 00 a1 DST IDX SRC (5 bytes)
+                // MODE=0xa1: upper=0xa(IdxReg dst), lower=0x1(RegS src).
+                // Copies the source string/data bytes into the dst buffer at byte offset idx
+                // (used to splice converted selectors into a telegram being built).
+                [0x00, 0xa1, dst_reg, idx_reg, src_s, ..] => {
+                    let idx = self.regs.get(idx_reg).map(Value::as_long).unwrap_or(0) as usize;
+                    let src_bytes = self.reg_bytes(src_s);
+                    let mut data = match self.regs.get(dst_reg) {
+                        Some(Value::Data(d)) => d.clone(),
+                        Some(Value::Str(s))  => unlat(s),
+                        _                    => Vec::new(),
+                    };
+                    let end = idx + src_bytes.len();
+                    if data.len() < end { data.resize(end, 0); }
+                    data[idx..end].copy_from_slice(&src_bytes);
+                    self.regs.insert(*dst_reg, Value::Data(data));
+                    ip += 5;
+                }
+
+                // move [DST_REG + IMM], SRC_BYTE: 00 92 DST IMM_lo IMM_hi SRC (6 bytes)
+                // MODE=0x92: upper=0x9(IdxImm dst = reg + u16 offset), lower=0x2(RegAB src)
+                [0x00, 0x92, dst_reg, imm_lo, imm_hi, src_b, ..] => {
+                    let idx = (*imm_lo as usize) | ((*imm_hi as usize) << 8);
                     let byte_val = self.get_byte_reg(*src_b);
                     let mut data = match self.regs.get(dst_reg) {
                         Some(Value::Data(d)) => d.clone(),
-                        Some(Value::Str(s))  => s.as_bytes().to_vec(),
+                        Some(Value::Str(s))  => unlat(s),
                         _                    => Vec::new(),
                     };
                     if data.len() <= idx { data.resize(idx + 1, 0); }
                     data[idx] = byte_val;
                     self.regs.insert(*dst_reg, Value::Data(data));
-                    ip += 5;
+                    ip += 6;
                 }
 
                 // move RegAB, RegAB: 00 22 B1 B2
@@ -245,28 +356,16 @@ impl Vm {
                     ip += 7;
                 }
 
-                // move ImmStr into second reg (a2flt encoding): 3a 18 R NN_lo NN_hi [NN]
-                // Note: opcode 0x3a = a2flt but in practice this form loads an ImmStr
-                [0x3a, 0x18, reg, nn_lo, nn_hi, ..] => {
-                    let n = *nn_lo as usize | ((*nn_hi as usize) << 8);
-                    if ip + 5 + n > code.len() {
-                        return Err(format!("MOVE3A truncated at ip={ip:#x}"));
-                    }
-                    let s = cstr(&code[ip + 5..ip + 5 + n]);
-                    self.regs.insert(*reg, Value::Str(s));
-                    ip += 5 + n;
-                }
-
                 // move RegAB, Imm8: 00 25 R V
                 [0x00, 0x25, reg, v, ..] => {
                     self.set_byte_reg(*reg, *v);
                     ip += 4;
                 }
 
-                // move RegI, Imm16: 00 36 R V_lo V_hi
+                // move RegI, Imm16: 00 36 R V_lo V_hi  (I overlaps L — write via helper)
                 [0x00, 0x36, reg, v_lo, v_hi, ..] => {
                     let v = *v_lo as i32 | ((*v_hi as i32) << 8);
-                    self.regs.insert(*reg, Value::Long(v));
+                    self.write_reg_val(*reg, v);
                     ip += 5;
                 }
 
@@ -281,6 +380,68 @@ impl Vm {
                 [0x00, 0x45, reg, v, ..] => {
                     self.regs.insert(*reg, Value::Long(*v as i32));
                     ip += 4;
+                }
+
+                // move <numreg>, S[idx] — read dest-width bytes little-endian from an
+                // S-register at an immediate (IdxImm) or register (IdxReg) index.
+                // EDIABAS OpMove with indexed byte[] source; len = dest register width.
+                [0x00, mode, ..]
+                    if matches!(mode >> 4, 2 | 3 | 4)
+                       && matches!(mode & 0xf, 0x9 | 0xa)
+                       && ip + 4 < code.len() =>
+                {
+                    let hi = mode >> 4;
+                    let lo = mode & 0xf;
+                    let width = nib_width(hi);
+                    let dst = code[ip + 2];
+                    let base = code[ip + 3];
+                    let (offset, next) = if lo == 0x9 {
+                        let lo_b = code.get(ip + 4).copied().unwrap_or(0);
+                        let hi_b = code.get(ip + 5).copied().unwrap_or(0);
+                        (u16::from_le_bytes([lo_b, hi_b]) as usize, ip + 6)
+                    } else {
+                        let ir = code.get(ip + 4).copied().unwrap_or(0);
+                        (reg_val_from_map(&self.regs, ir).max(0) as usize, ip + 5)
+                    };
+                    let value = self.read_sreg_value(base, offset, width);
+                    if std::env::var("EDIABAS_TRACE").is_ok() {
+                        let src = self.reg_bytes(&base);
+                        eprintln!("MOVEIDX dst_reg={:#04x} base=S{} off={offset} w={width} val={value:#x} src={:02X?}",
+                                  dst, base.wrapping_sub(0x1c), src);
+                    }
+                    self.write_num_reg(hi, dst, value);
+                    self.flags.carry = false;
+                    self.flags.overflow = false;
+                    self.set_flags_wl(value, width);
+                    ip = next;
+                }
+
+                // move RegS, S[idx:len] — copy a byte slice from a source S-register
+                // (indexed-with-length modes) into a destination S-register.
+                // EDIABAS OpMove byte[] ← byte[]. Used to extract value bytes.
+                [0x00, mode, ..]
+                    if (mode >> 4) == 1
+                       && matches!(mode & 0xf, 0xc | 0xd | 0xe | 0xf)
+                       && ip + 3 < code.len() =>
+                {
+                    let lo = mode & 0xf;
+                    let dst = code[ip + 2];
+                    if let Some((base, idx, len, next)) = self.read_slice_operand(lo, code, ip + 3) {
+                        let src = self.reg_bytes(&base);
+                        let slice: Vec<u8> = (0..len).map(|i| src.get(idx + i).copied().unwrap_or(0)).collect();
+                        if std::env::var("EDIABAS_TRACE").is_ok() {
+                            eprintln!("SLICE dst=S{} base=S{} idx={idx} len={len} src_len={} slice={:02X?}",
+                                      dst.wrapping_sub(0x1c), base.wrapping_sub(0x1c), src.len(), slice);
+                        }
+                        self.regs.insert(dst, Value::Data(slice));
+                        self.flags.carry = false;
+                        self.flags.zero = false;
+                        self.flags.minus = false;
+                        self.flags.overflow = false;
+                        ip = next;
+                    } else {
+                        ip = skip_instr(code, ip);
+                    }
                 }
 
                 // move generic (fallthrough for other 00 XX encodings)
@@ -314,7 +475,7 @@ impl Vm {
                     let src_byte = self.get_byte_reg(*src_b);
                     let mut data = match self.regs.get(base) {
                         Some(Value::Data(d)) => d.clone(),
-                        Some(Value::Str(s))  => s.as_bytes().to_vec(),
+                        Some(Value::Str(s))  => unlat(s),
                         _                    => Vec::new(),
                     };
                     if data.len() <= idx { data.resize(idx + 1, 0); }
@@ -618,47 +779,31 @@ impl Vm {
 
                 // ── push / pop ────────────────────────────────────────────────
 
-                // push #Imm32
-                [0x1e, 0x70, v0, v1, v2, v3, ..] => {
-                    let v = i32::from_le_bytes([*v0, *v1, *v2, *v3]);
-                    self.stack.push(Value::Long(v));
-                    ip += 6;
+                // push arg0 — width-aware byte push (EDIABAS OpPush).
+                // Pushes `width` bytes little-endian; width = operand data length.
+                [0x1e, ..] if ip + 1 < code.len() => {
+                    let hi = code[ip + 1] >> 4;
+                    let (val, next) = self.read_typed_operand(hi, code, ip + 2);
+                    let width = nib_width(hi);
+                    if width > 0 { self.stack_push_bytes(val as i64, width); }
+                    ip = next;
                 }
 
-                // push LReg
-                [0x1e, 0x40, xx, ..] => {
-                    let v = self.regs.get(xx).cloned().unwrap_or(Value::Long(0));
-                    self.stack.push(v);
-                    ip += 3;
-                }
-
-                // push RegS
-                [0x1e, 0x10, xx, ..] => {
-                    let v = self.regs.get(xx).cloned().unwrap_or(Value::Str(String::new()));
-                    self.stack.push(v);
-                    ip += 3;
-                }
-
-                // push ImmStr
-                [0x1e, 0x80, nn_lo, nn_hi, ..] => {
-                    let n = *nn_lo as usize | ((*nn_hi as usize) << 8);
-                    let s = if ip + 4 + n <= code.len() { cstr(&code[ip+4..ip+4+n]) } else { String::new() };
-                    self.stack.push(Value::Str(s));
-                    ip += 4 + n;
-                }
-
-                // pop → LReg
-                [0x1f, 0x40, xx, ..] => {
-                    let v = self.stack.pop().unwrap_or(Value::Long(0));
-                    self.regs.insert(*xx, v);
-                    ip += 3;
-                }
-
-                // pop → RegS
-                [0x1f, 0x10, xx, ..] => {
-                    let v = self.stack.pop().unwrap_or(Value::Str(String::new()));
-                    self.regs.insert(*xx, v);
-                    ip += 3;
+                // pop → reg — width-aware byte pop (EDIABAS OpPop).
+                // Pops `width` bytes (width = destination register width), sets flags.
+                [0x1f, ..] if ip + 2 < code.len() => {
+                    let hi = code[ip + 1] >> 4;
+                    let width = nib_width(hi);
+                    if width > 0 {
+                        let reg = code[ip + 2];
+                        let value = self.stack_pop_bytes(width);
+                        self.write_num_reg(hi, reg, value);
+                        self.flags.overflow = false;
+                        self.set_flags_wl(value, width);
+                        ip += 3;
+                    } else {
+                        ip = skip_instr(code, ip);
+                    }
                 }
 
                 // popf / pushf — flags stack (no-op, 2 bytes)
@@ -719,7 +864,12 @@ impl Vm {
                     if r1 != 0xff {
                         let s = self.reg_str(r1);
                         let n = n_val.max(0) as usize;
-                        let cut: String = s.chars().take(n).collect();
+                        // EDIABAS OpScut removes `n` bytes from the END; the stored
+                        // byte array is null-terminated so its length is chars+1.
+                        // Keep the first (chars + 1 - n) characters.
+                        let total = s.chars().count();
+                        let keep = (total + 1).saturating_sub(n).min(total);
+                        let cut: String = s.chars().take(keep).collect();
                         self.regs.insert(r1, Value::Str(cut));
                     }
                     ip = p2;
@@ -734,25 +884,44 @@ impl Vm {
                     // dst register (for result length) — skip it
                     if (1..=4).contains(&hi) && pos < code.len() { pos += 1; }
                     let (s, p2) = read_str_at(&self.regs, lo, code, pos);
-                    let len = s.len() as i32;
+                    // Latin-1 strings store each logical byte as one char; use the
+                    // char count, not the UTF-8 byte length (`s.len()`), which would
+                    // over-count bytes ≥ 0x80 that encode as 2 UTF-8 bytes.
+                    let len = s.chars().count() as i32;
                     self.regs.insert(REG_L0, Value::Long(len));
                     ip = p2;
                 }
 
-                // spaste — paste S2 into S1 at position L0: 24 11 R1 R2
+                // spaste — paste src string into dst at a position: 24 XX DST SRC.
+                // DST may be a plain RegS (position from L0) or an indexed operand
+                // S[idx] / S[reg] (position from the index). Consume operand bytes
+                // by mode so the instruction stream never desyncs.
                 [0x24, ..] if ip + 1 < code.len() => {
                     let mode = code[ip + 1];
                     let hi = mode >> 4;
                     let lo = mode & 0xf;
                     let mut pos = ip + 2;
-                    let r1 = if (1..=4).contains(&hi) && pos < code.len() {
-                        let r = code[pos]; pos += 1; r
-                    } else { 0xff };
+                    let g = |p: usize| code.get(p).copied().unwrap_or(0);
+                    let (r1, index): (u8, Option<usize>) = match hi {
+                        1..=4 => { let r = g(pos); pos += 1; (r, None) }
+                        0x9 => { // IdxImm: base + u16 idx
+                            let r = g(pos);
+                            let idx = u16::from_le_bytes([g(pos + 1), g(pos + 2)]) as usize;
+                            pos += 3; (r, Some(idx))
+                        }
+                        0xa => { // IdxReg: base + reg idx
+                            let r = g(pos);
+                            let idx = self.regs.get(&g(pos + 1)).map(Value::as_long).unwrap_or(0).max(0) as usize;
+                            pos += 2; (r, Some(idx))
+                        }
+                        _ => { pos += nibble_size(hi, code, pos); (0xff, None) }
+                    };
                     let (s2, p2) = read_str_at(&self.regs, lo, code, pos);
                     if r1 != 0xff {
                         let mut s1 = self.reg_str(r1);
-                        let insert_pos = self.regs.get(&REG_L0)
-                            .map(Value::as_long).unwrap_or(0).max(0) as usize;
+                        let insert_pos = index.unwrap_or_else(|| {
+                            self.regs.get(&REG_L0).map(Value::as_long).unwrap_or(0).max(0) as usize
+                        });
                         if insert_pos >= s1.len() { s1.push_str(&s2); }
                         else { s1.insert_str(insert_pos, &s2); }
                         self.regs.insert(r1, Value::Str(s1));
@@ -930,19 +1099,47 @@ impl Vm {
                     ip = p2;
                 }
 
-                // a2flt (3a) — only the non-ImmStr forms (ImmStr already handled above)
-                [0x3a, ..] if ip + 1 < code.len() => {
-                    ip = skip_instr(code, ip);
+                // a2flt (3a) — ASCII/reg → float; fix2flt (68) — int → float.
+                // Both: dst_float_reg = src_as_f64 (read_flt_src handles Str/int/ImmStr).
+                [0x3a, ..] | [0x68, ..] if ip + 1 < code.len() => {
+                    let mode = code[ip + 1];
+                    let (hi, lo) = (mode >> 4, mode & 0xf);
+                    let pos0 = ip + 2;
+                    let l0 = nibble_size(hi, code, pos0);
+                    let dst = code[pos0];
+                    let (val, l1) = self.read_flt_src(code, pos0 + l0, lo);
+                    self.regs.insert(dst, Value::Float(val));
+                    self.flags.zero = val == 0.0;
+                    self.flags.minus = val < 0.0;
+                    ip += 2 + l0 + l1;
                 }
 
-                // fix2flt (68) — integer → float (no-op, store as-is)
-                [0x68, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); }
+                // flt2a (87) — float → ASCII string
+                [0x87, ..] if ip + 1 < code.len() => {
+                    let mode = code[ip + 1];
+                    let (hi, lo) = (mode >> 4, mode & 0xf);
+                    let pos0 = ip + 2;
+                    let l0 = nibble_size(hi, code, pos0);
+                    let dst = code[pos0];
+                    let (val, l1) = self.read_flt_src(code, pos0 + l0, lo);
+                    self.regs.insert(dst, Value::Str(fmt_flt(val)));
+                    ip += 2 + l0 + l1;
+                }
 
-                // flt2a (87) — float → string (treat float reg as string)
-                [0x87, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); }
-
-                // flt2fix (96) — float → integer
-                [0x96, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); }
+                // flt2fix (96) — float → integer (rounded), into an int/long reg
+                [0x96, ..] if ip + 1 < code.len() => {
+                    let mode = code[ip + 1];
+                    let (hi, lo) = (mode >> 4, mode & 0xf);
+                    let pos0 = ip + 2;
+                    let l0 = nibble_size(hi, code, pos0);
+                    let dst = code[pos0];
+                    let (val, l1) = self.read_flt_src(code, pos0 + l0, lo);
+                    let iv = val.round() as i32;
+                    self.regs.insert(dst, Value::Long(iv));
+                    self.flags.zero = iv == 0;
+                    self.flags.minus = iv < 0;
+                    ip += 2 + l0 + l1;
+                }
 
                 // ── binary ↔ hex/string conversions ──────────────────────────
 
@@ -1121,10 +1318,35 @@ impl Vm {
                     ip += total;
                 }
 
+                // erg* with a DYNAMIC (register) result name — mode hi=1 (RegS name).
+                // EDIABAS OpErg*: arg0 = result name string, arg1 = value. Covers
+                // e.g. `ergr S6, S10` / `ergs S7, S5` used by MW_SELECT_LESEN_NORM.
+                [op @ (0x34 | 0x35 | 0x36 | 0x37 | 0x38 | 0x39 | 0x81 | 0x82), mode, ..]
+                    if (mode >> 4) == 1 && ip + 2 < code.len() =>
+                {
+                    let lo = mode & 0xf;
+                    let name = self.reg_str(code[ip + 2]);
+                    let vpos = ip + 3;
+                    let (value, next) = match op {
+                        0x39 | 0x81 | 0x38 => { // ergs / ergc / ergr → string value
+                            let (s, n) = read_str_at(&self.regs, lo, code, vpos);
+                            (Value::Str(s), n)
+                        }
+                        _ => { // ergb / ergw / ergd / ergi / ergl → integer value
+                            let (v, n) = read_long_at(&self.regs, lo, code, vpos);
+                            (Value::Long(v), n)
+                        }
+                    };
+                    if !name.is_empty() { current.insert(name, value); }
+                    ip = next;
+                }
+
                 // ── result sets ───────────────────────────────────────────────
 
-                // enewset (40) — commit current result set, start new
-                [0x40, 0x00, ..] => {
+                // enewset (40) — commit current result set, start new.
+                // SPECIAL ENCODING: always 2 bytes; the 2nd byte is NOT a mode byte
+                // (verified across corpus — see BEST2-DECODER.md). Any 0x40 form commits.
+                [0x40, ..] if ip + 1 < code.len() => {
                     sets.push(std::mem::take(&mut current));
                     ip += 2;
                 }
@@ -1156,6 +1378,18 @@ impl Vm {
                                 let ci = t.col_index(&col_name)?;
                                 t.find_row(ci, &search_val)
                             });
+                        if std::env::var("EDIABAS_TRACE").is_ok() {
+                            let sample: Vec<String> = self.active_table.as_ref()
+                                .and_then(|tn| self.tables.get(tn.as_str()))
+                                .map(|t| {
+                                    let ci = t.col_index(&col_name);
+                                    t.rows.iter().take(6)
+                                        .map(|r| ci.and_then(|c| r.get(c)).cloned().unwrap_or_default())
+                                        .collect()
+                                }).unwrap_or_default();
+                            eprintln!("TABSEEK tab={:?} col={col_name} key={search_val:?} found={found:?} adr_sample={sample:?}",
+                                      self.active_table);
+                        }
                         self.found_row = found;
                         self.regs.insert(REG_L0, Value::Long(if found.is_some() { 1 } else { 0 }));
                     }
@@ -1195,7 +1429,9 @@ impl Vm {
                                 Some(t.cell(ri, ci).to_string())
                             })
                             .unwrap_or_default();
-                        eprintln!("TABGET [{col_name}] → {val:?}");
+                        if std::env::var("EDIABAS_TRACE").is_ok() {
+                            eprintln!("TABGET [{col_name}] → {val:?}");
+                        }
                         self.regs.insert(*dst, Value::Str(val));
                     }
                     ip += 5 + n;
@@ -1312,8 +1548,9 @@ impl Vm {
                     let n = (*nn_lo as usize) | ((*nn_hi as usize) << 8);
                     if n >= 18 && ip + 4 + n <= code.len() {
                         self.comm_cfg = parse_comm_params(&code[ip + 4..ip + 4 + n]);
-                        eprintln!("[xsetpar] concept={:?} baud={} len_offset={}",
-                            self.comm_cfg.protocol, self.comm_cfg.baud, self.comm_cfg.len_offset);
+                        eprintln!("[xsetpar] concept={:?} baud={} len_offset={} interbyte_ms={} (from .prg)",
+                            self.comm_cfg.protocol, self.comm_cfg.baud, self.comm_cfg.len_offset,
+                            self.comm_cfg.interbyte_ms);
                         if let Err(e) = self.transport.configure(&self.comm_cfg) {
                             eprintln!("[xsetpar@{ip:#x}] configure failed: {e}");
                         }
@@ -1387,16 +1624,68 @@ impl Vm {
                 // generr (ac) — generate error (no-op)
                 [0xac, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); }
 
-                // ── atsp (50) — set protocol parameters ──────────────────────
-                [0x50, 0x47, _, _, _, _, _, ..] => { ip += 7; }
-                [0x50, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); }
+                // atsp reg, #pos — peek `width` bytes from the value stack without
+                // popping (EDIABAS OpAtsp): index = pos - width from top, MSB-first.
+                [0x50, ..] if ip + 2 < code.len() => {
+                    let mode = code[ip + 1];
+                    let hi = mode >> 4;
+                    let lo = mode & 0xf;
+                    let width = nib_width(hi);
+                    if width > 0 {
+                        let reg = code[ip + 2];
+                        let (pos_val, next) = self.read_typed_operand(lo, code, ip + 3);
+                        let value = self.stack_atsp(pos_val as usize, width);
+                        if std::env::var("EDIABAS_TRACE").is_ok() {
+                            eprintln!("ATSP reg={:#04x} pos={pos_val} w={width} val={value:#x} stacklen={}",
+                                      reg, self.stack.len());
+                        }
+                        self.write_num_reg(hi, reg, value);
+                        self.set_flags_wl(value, width);
+                        ip = next;
+                    } else {
+                        ip = skip_instr(code, ip);
+                    }
+                }
 
                 // ── float arithmetic (no-op) ──────────────────────────────────
-                [0x3b, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // fadd
-                [0x3c, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // fsub
-                [0x3d, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // fmul
-                [0x3e, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // fdiv
-                [0xa1, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // fcomp
+                // float arithmetic: dst = dst OP src, sets zero/minus flags on the result.
+                // Setting flags is essential — measurement jobs branch on jz/jnz after these.
+                [op @ 0x3b..=0x3e, ..] if ip + 1 < code.len() => {
+                    let opcode = *op;
+                    let mode = code[ip + 1];
+                    let (hi, lo) = (mode >> 4, mode & 0xf);
+                    let pos0 = ip + 2;
+                    let l0 = nibble_size(hi, code, pos0);
+                    let dst = code[pos0];
+                    let (src, l1) = self.read_flt_src(code, pos0 + l0, lo);
+                    let a = self.reg_flt(dst);
+                    let r = match opcode {
+                        0x3b => a + src,
+                        0x3c => a - src,
+                        0x3d => a * src,
+                        _    => if src != 0.0 { a / src } else { 0.0 }, // fdiv
+                    };
+                    self.regs.insert(dst, Value::Float(r));
+                    self.flags.zero = r == 0.0;
+                    self.flags.minus = r < 0.0;
+                    ip += 2 + l0 + l1;
+                }
+
+                // fcomp (a1) — compare two floats, set flags only (no write)
+                [0xa1, ..] if ip + 1 < code.len() => {
+                    let mode = code[ip + 1];
+                    let (hi, lo) = (mode >> 4, mode & 0xf);
+                    let pos0 = ip + 2;
+                    let l0 = nibble_size(hi, code, pos0);
+                    let a = self.reg_flt(code[pos0]);
+                    let (b, l1) = self.read_flt_src(code, pos0 + l0, lo);
+                    let d = a - b;
+                    self.flags.zero = d == 0.0;
+                    self.flags.minus = d < 0.0;
+                    self.flags.carry = a < b;
+                    ip += 2 + l0 + l1;
+                }
+
                 [0x88, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // setflt
                 [0x9b, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // flt2y4
                 [0x9c, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // flt2y8
@@ -1414,12 +1703,69 @@ impl Vm {
                 [0x59, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // fclose
 
                 // ── parameter ops (par*) ──────────────────────────────────────
-                [0x55, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // parb
-                [0x56, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // parw
-                [0x57, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // parl
-                [0x58, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // pars
-                [0x69, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // parr
-                [0x7f, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // pary
+                // pary (7f) — whole argument buffer → S-reg (as string).
+                // Sets zero flag when there are no args (jobs jz right after).
+                [0x7f, ..] if ip + 1 < code.len() => {
+                    let mode = code[ip + 1];
+                    let (hi, lo) = (mode >> 4, mode & 0xf);
+                    let dst = code[ip + 2];
+                    let s = blat(&self.args);
+                    // EDIABAS OpPary: Zero = true (no arg); Zero = false when arg present.
+                    self.flags.zero = self.args.is_empty();
+                    self.regs.insert(dst, Value::Str(s));
+                    ip += 2 + nibble_size(hi, code, ip + 2) + nibble_size(lo, code, ip + 2);
+                }
+
+                // parn (80) — number of arguments → int/long reg
+                [0x80, ..] if ip + 1 < code.len() => {
+                    let mode = code[ip + 1];
+                    let (hi, lo) = (mode >> 4, mode & 0xf);
+                    let dst = code[ip + 2];
+                    let n = self.arg_segments().len() as i32;
+                    self.flags.zero = n == 0;
+                    self.regs.insert(dst, Value::Long(n));
+                    ip += 2 + nibble_size(hi, code, ip + 2) + nibble_size(lo, code, ip + 2);
+                }
+
+                // pars (58) / parr (69) — n-th argument (1-based) → S-reg (string / raw)
+                [0x58, ..] | [0x69, ..] if ip + 1 < code.len() => {
+                    let opcode = code[ip];
+                    let mode = code[ip + 1];
+                    let (hi, lo) = (mode >> 4, mode & 0xf);
+                    let dst = code[ip + 2];
+                    let l0 = nibble_size(hi, code, ip + 2);
+                    let n = read_imm_u32(code, ip + 2 + l0, lo) as usize;
+                    let seg = self.arg_segments().get(n.wrapping_sub(1)).map(|s| s.to_vec());
+                    // zero flag = requested argument is absent/empty (jobs jnz on presence)
+                    self.flags.zero = seg.as_ref().map_or(true, |s| s.is_empty());
+                    let seg = seg.unwrap_or_default();
+                    let v = if opcode == 0x69 {
+                        Value::Data(seg)
+                    } else {
+                        Value::Str(String::from_utf8_lossy(&seg).into_owned())
+                    };
+                    self.regs.insert(dst, v);
+                    ip += 2 + l0 + nibble_size(lo, code, ip + 2 + l0);
+                }
+
+                // parb (55) / parw (56) / parl (57) — n-th argument (1-based) as integer
+                [0x55, ..] | [0x56, ..] | [0x57, ..] if ip + 1 < code.len() => {
+                    let opcode = code[ip];
+                    let mode = code[ip + 1];
+                    let (hi, lo) = (mode >> 4, mode & 0xf);
+                    let dst = code[ip + 2];
+                    let l0 = nibble_size(hi, code, ip + 2);
+                    let n = read_imm_u32(code, ip + 2 + l0, lo) as usize;
+                    let seg_count = self.arg_segments().len();
+                    self.flags.zero = n == 0 || n > seg_count;
+                    let val = self.arg_int(n);
+                    if opcode == 0x55 && hi == 2 {
+                        self.set_byte_reg(dst, val as u8);
+                    } else {
+                        self.regs.insert(dst, Value::Long(val));
+                    }
+                    ip += 2 + l0 + nibble_size(lo, code, ip + 2 + l0);
+                }
                 [0x80, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // parn
 
                 // ── shared memory (no-op) ─────────────────────────────────────
@@ -1493,6 +1839,122 @@ impl Vm {
         self.regs.insert(long_reg, Value::Long(new_val));
     }
 
+    /// Word registers I0-I7 (0x10-0x17) OVERLAY the L registers, like B regs:
+    /// I0=low word of L0, I1=high word of L0, I2=low word of L1, … (EDIABAS flat
+    /// register file). Writing I updates the containing L register.
+    fn set_word_reg(&mut self, i_reg: u8, val: u16) {
+        let idx = i_reg - 0x10;
+        let long_reg = REG_L0 + idx / 2;
+        let wp = (idx % 2) as u32;
+        let v = self.regs.get(&long_reg).map(Value::as_long).unwrap_or(0);
+        let mask = !(0xffffi32 << (wp * 16));
+        self.regs.insert(long_reg, Value::Long((v & mask) | (((val as i32) & 0xffff) << (wp * 16))));
+    }
+
+    /// Write a numeric value into any B/I/L register, honouring the B/I → L overlap.
+    fn write_reg_val(&mut self, reg: u8, val: i32) {
+        match reg {
+            0x00..=0x0f => self.set_byte_reg(reg, val as u8),
+            0x10..=0x17 => self.set_word_reg(reg, val as u16),
+            _ => { self.regs.insert(reg, Value::Long(val)); }
+        }
+    }
+
+    /// Push `width` bytes of `val` (little-endian) onto the byte stack.
+    fn stack_push_bytes(&mut self, val: i64, width: usize) {
+        let mut v = val as u64;
+        for _ in 0..width {
+            self.stack.push((v & 0xff) as u8);
+            v >>= 8;
+        }
+    }
+
+    /// Pop `width` bytes off the byte stack, MSB-first (matches EDIABAS OpPop).
+    fn stack_pop_bytes(&mut self, width: usize) -> i64 {
+        let mut value: u64 = 0;
+        for _ in 0..width {
+            let b = self.stack.pop().unwrap_or(0);
+            value = (value << 8) | b as u64;
+        }
+        value as i64
+    }
+
+    /// Peek `width` bytes at stack position `pos` without popping (EDIABAS OpAtsp).
+    /// index = pos - width from the top of stack, read MSB-first.
+    fn stack_atsp(&self, pos: usize, width: usize) -> i64 {
+        let len = self.stack.len();
+        if width == 0 || len < width { return 0; }
+        let index = pos.saturating_sub(width);
+        let mut value: u64 = 0;
+        for i in 0..width {
+            let si = index + i;
+            let b = if si < len { self.stack[len - 1 - si] } else { 0 };
+            value = (value << 8) | b as u64;
+        }
+        value as i64
+    }
+
+    /// Write a numeric value into `reg`. The register id selects the B/I/L overlap.
+    fn write_num_reg(&mut self, _nib: u8, reg: u8, value: i64) {
+        self.write_reg_val(reg, value as i32);
+    }
+
+    /// Decode an indexed-with-length source operand (modes IdxImmLenImm/IdxImmLenReg/
+    /// IdxRegLenImm/IdxRegLenReg) → (base_reg, index, length, next_pos). Byte layouts
+    /// per EdiabasLib GetOpArg.
+    fn read_slice_operand(&self, lo: u8, code: &[u8], pos: usize) -> Option<(u8, usize, usize, usize)> {
+        let g = |p: usize| code.get(p).copied().unwrap_or(0);
+        let reg_val = |r: u8| reg_val_from_map(&self.regs, r).max(0) as usize;
+        match lo {
+            0xc => { // IdxImmLenImm: reg + u16 idx + u16 len   (5 bytes)
+                let base = g(pos);
+                let idx = u16::from_le_bytes([g(pos + 1), g(pos + 2)]) as usize;
+                let len = u16::from_le_bytes([g(pos + 3), g(pos + 4)]) as usize;
+                Some((base, idx, len, pos + 5))
+            }
+            0xd => { // IdxImmLenReg: reg + u16 idx + reg len    (4 bytes)
+                let base = g(pos);
+                let idx = u16::from_le_bytes([g(pos + 1), g(pos + 2)]) as usize;
+                Some((base, idx, reg_val(g(pos + 3)), pos + 4))
+            }
+            0xe => { // IdxRegLenImm: reg + reg idx + u16 len    (4 bytes)
+                let base = g(pos);
+                let idx = reg_val(g(pos + 1));
+                let len = u16::from_le_bytes([g(pos + 2), g(pos + 3)]) as usize;
+                Some((base, idx, len, pos + 4))
+            }
+            0xf => { // IdxRegLenReg: reg + reg idx + reg len    (3 bytes)
+                let base = g(pos);
+                Some((base, reg_val(g(pos + 1)), reg_val(g(pos + 2)), pos + 3))
+            }
+            _ => None,
+        }
+    }
+
+    /// Read `width` bytes little-endian from S-register `sreg`'s data at byte `offset`
+    /// (EDIABAS Operand.GetValueData over an indexed byte[] source).
+    fn read_sreg_value(&self, sreg: u8, offset: usize, width: usize) -> i64 {
+        let data = self.reg_bytes(&sreg);
+        let mut value: u64 = 0;
+        for i in (0..width).rev() {
+            let b = data.get(offset + i).copied().unwrap_or(0);
+            value = (value << 8) | b as u64;
+        }
+        value as i64
+    }
+
+    /// EDIABAS Flags.UpdateFlags: set zero + sign(minus) by operand width.
+    fn set_flags_wl(&mut self, value: i64, width: usize) {
+        let (mask, sign): (u64, u64) = match width {
+            1 => (0xff, 0x80),
+            2 => (0xffff, 0x8000),
+            _ => (0xffff_ffff, 0x8000_0000),
+        };
+        let v = value as u64;
+        self.flags.zero = (v & mask) == 0;
+        self.flags.minus = (v & sign) != 0;
+    }
+
     /// Decode two ALU operands from the MODE byte, handling RegAB (nibble=2) correctly.
     /// Returns (hi_nibble, dst_reg, dst_val, src_val, next_ip). dst_reg=0xff if no dst.
     fn alu2_typed(&self, code: &[u8], ip: usize) -> (u8, u8, i32, i32, usize) {
@@ -1502,19 +1964,50 @@ impl Vm {
         let lo = mode & 0xf;
         let mut pos = ip + 2;
 
-        let dst = if (1..=4).contains(&hi) && pos < code.len() {
-            let r = code[pos]; pos += 1; r
-        } else { 0xff };
-
-        let dst_val = if dst != 0xff {
-            match hi {
-                2 => self.get_byte_reg(dst) as i32,
-                _ => self.regs.get(&dst).map(Value::as_long).unwrap_or(0),
-            }
-        } else { 0 };
+        let (dst, dst_val) = if (1..=4).contains(&hi) && pos < code.len() {
+            let r = code[pos]; pos += 1;
+            (r, reg_val_from_map(&self.regs, r))
+        } else if hi >= 9 {
+            // Indexed dst operand (e.g. `comp S1[#0], #0`): read its value and
+            // advance past the operand bytes so the stream doesn't desync. dst=0xff
+            // marks it non-writable-back (fine for comp/test; alu writes are skipped).
+            let (v, next) = self.read_indexed_val(hi, code, pos);
+            pos = next;
+            (0xff, v)
+        } else {
+            (0xff, 0)
+        };
 
         let (src_val, next) = self.read_typed_operand(lo, code, pos);
         (hi, dst, dst_val, src_val, next)
+    }
+
+    /// Read the value of an indexed operand (modes 9/a/c/d/e/f) from an S-register,
+    /// returning (value, next_pos). IdxImm/IdxReg read a single byte; the *Len* modes
+    /// read up to 4 bytes little-endian.
+    fn read_indexed_val(&self, nib: u8, code: &[u8], pos: usize) -> (i32, usize) {
+        let g = |p: usize| code.get(p).copied().unwrap_or(0);
+        let reg_val = |r: u8| reg_val_from_map(&self.regs, r).max(0) as usize;
+        match nib {
+            0x9 => {
+                let base = g(pos);
+                let idx = u16::from_le_bytes([g(pos + 1), g(pos + 2)]) as usize;
+                (self.read_sreg_value(base, idx, 1) as i32, pos + 3)
+            }
+            0xa => {
+                let base = g(pos);
+                let idx = reg_val(g(pos + 1));
+                (self.read_sreg_value(base, idx, 1) as i32, pos + 2)
+            }
+            0xc | 0xd | 0xe | 0xf => {
+                if let Some((base, idx, len, next)) = self.read_slice_operand(nib, code, pos) {
+                    (self.read_sreg_value(base, idx, len.clamp(1, 4)) as i32, next)
+                } else {
+                    (0, pos + nibble_size(nib, code, pos))
+                }
+            }
+            _ => (0, pos + nibble_size(nib, code, pos)),
+        }
     }
 
     /// Read a single operand value by nibble type, with correct RegAB (nibble=2) handling.
@@ -1523,7 +2016,7 @@ impl Vm {
             0 => (0, pos),
             1 | 3 | 4 => {
                 if pos < code.len() {
-                    (self.regs.get(&code[pos]).map(Value::as_long).unwrap_or(0), pos + 1)
+                    (reg_val_from_map(&self.regs, code[pos]), pos + 1)
                 } else { (0, pos + 1) }
             }
             2 => {
@@ -1543,26 +2036,28 @@ impl Vm {
                     (0, pos + 2 + n)
                 } else { (0, pos) }
             }
-            9 | 0xa => (0, pos + 2),
-            0xb     => (0, pos + 3),
-            _       => (0, pos + 3),
+            0x9 => (0, pos + 3),   // IdxImm
+            0xa => (0, pos + 2),   // IdxReg
+            0xb => (0, pos + 4),   // IdxRegImm
+            0xc => (0, pos + 5),   // IdxImmLenImm
+            0xd => (0, pos + 4),   // IdxImmLenReg
+            0xe => (0, pos + 4),   // IdxRegLenImm
+            _   => (0, pos + 3),   // IdxRegLenReg
         }
     }
 
     /// Write ALU result back to destination, using correct RegAB handling (nibble=2).
-    fn alu2_write(&mut self, hi: u8, dst: u8, result: i32) {
+    fn alu2_write(&mut self, _hi: u8, dst: u8, result: i32) {
         if dst == 0xff { return; }
-        match hi {
-            2 => self.set_byte_reg(dst, result as u8),
-            _ => { self.regs.insert(dst, Value::Long(result)); }
-        }
+        self.write_reg_val(dst, result);
     }
 
     fn reg_str(&self, reg: u8) -> String {
         match self.regs.get(&reg) {
             Some(Value::Str(s)) => s.clone(),
-            Some(Value::Data(d)) => hex(d),
+            Some(Value::Data(d)) => blat(d),
             Some(Value::Long(v)) => v.to_string(),
+            Some(Value::Float(f)) => fmt_flt(*f),
             None => String::new(),
         }
     }
@@ -1570,9 +2065,44 @@ impl Vm {
     fn reg_bytes(&self, reg: &u8) -> Vec<u8> {
         match self.regs.get(reg) {
             Some(Value::Data(d)) => d.clone(),
-            Some(Value::Str(s)) => s.as_bytes().to_vec(),
+            Some(Value::Str(s)) => unlat(s),
             Some(Value::Long(v)) => v.to_le_bytes().to_vec(),
+            Some(Value::Float(f)) => f.to_le_bytes().to_vec(),
             None => Vec::new(),
+        }
+    }
+
+    /// Read a register's value as f64 (float registers live in S-regs).
+    fn reg_flt(&self, id: u8) -> f64 {
+        match self.regs.get(&id) {
+            Some(Value::Float(f)) => *f,
+            Some(Value::Long(v)) => *v as f64,
+            Some(Value::Str(s)) => parse_f64(s),
+            Some(Value::Data(d)) if d.len() >= 8 => {
+                f64::from_le_bytes(d[..8].try_into().unwrap())
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Read the second operand of a float instruction as f64, honouring its
+    /// addressing-mode nibble. Returns (value, operand_byte_len).
+    fn read_flt_src(&self, code: &[u8], pos: usize, nib: u8) -> (f64, usize) {
+        match nib {
+            1 => (self.reg_flt(code[pos]), 1),                       // RegS
+            2 => (self.get_byte_reg(code[pos]) as f64, 1),          // RegAb
+            3 | 4 => (                                               // RegI / RegL
+                self.regs.get(&code[pos]).map(Value::as_long).unwrap_or(0) as f64, 1),
+            5 => (code[pos] as f64, 1),                              // Imm8
+            6 => (u16::from_le_bytes([code[pos], code[pos + 1]]) as f64, 2),
+            7 => (i32::from_le_bytes(
+                    [code[pos], code[pos + 1], code[pos + 2], code[pos + 3]]) as f64, 4),
+            8 => {                                                   // ImmStr → parse
+                let n = code[pos] as usize | ((code[pos + 1] as usize) << 8);
+                let s = cstr(&code[pos + 2..(pos + 2 + n).min(code.len())]);
+                (parse_f64(&s), 2 + n)
+            }
+            _ => (0.0, nibble_size(nib, code, pos)),                 // indexed fallback
         }
     }
 
@@ -1592,13 +2122,31 @@ impl Vm {
 
 
 /// Read a value from the operand at `pos` based on MODE nibble.
+/// Read a numeric register value honouring the B/I → L register overlap
+/// (byte regs = bytes of L, word regs = words of L, long regs = direct).
+fn reg_val_from_map(regs: &HashMap<u8, Value>, reg: u8) -> i32 {
+    match reg {
+        0x00..=0x0f => {
+            let long_reg = REG_L0 + reg / 4;
+            let bp = (reg % 4) as u32;
+            (regs.get(&long_reg).map(Value::as_long).unwrap_or(0) >> (bp * 8)) & 0xff
+        }
+        0x10..=0x17 => {
+            let idx = reg - 0x10;
+            let long_reg = REG_L0 + idx / 2;
+            let wp = (idx % 2) as u32;
+            (regs.get(&long_reg).map(Value::as_long).unwrap_or(0) >> (wp * 16)) & 0xffff
+        }
+        _ => regs.get(&reg).map(Value::as_long).unwrap_or(0),
+    }
+}
+
 fn read_long_at(regs: &HashMap<u8, Value>, nibble: u8, code: &[u8], pos: usize) -> (i32, usize) {
     match nibble {
         0 => (0, pos),
         1..=4 => {
             if pos < code.len() {
-                let r = code[pos];
-                (regs.get(&r).map(Value::as_long).unwrap_or(0), pos + 1)
+                (reg_val_from_map(regs, code[pos]), pos + 1)
             } else { (0, pos + 1) }
         }
         5 => if pos < code.len() { (code[pos] as i32, pos + 1) } else { (0, pos + 1) },
@@ -1614,10 +2162,13 @@ fn read_long_at(regs: &HashMap<u8, Value>, nibble: u8, code: &[u8], pos: usize) 
                 (0, pos + 2 + n)
             } else { (0, pos) }
         }
-        // Extended indexed modes — read base reg (and idx_reg if applicable) but value is 0
-        9 | 0xa => (0, pos + 2),
-        0xb     => (0, pos + 3),
-        _       => (0, pos + 3),
+        // Extended indexed modes — value not evaluated, but advance the correct size.
+        0x9 => (0, pos + 3),
+        0xa => (0, pos + 2),
+        0xb => (0, pos + 4),
+        0xc => (0, pos + 5),
+        0xd | 0xe => (0, pos + 4),
+        _   => (0, pos + 3),
     }
 }
 
@@ -1631,7 +2182,8 @@ fn read_str_at(regs: &HashMap<u8, Value>, nibble: u8, code: &[u8], pos: usize) -
                 let s = match regs.get(&r) {
                     Some(Value::Str(s)) => s.clone(),
                     Some(Value::Long(v)) => v.to_string(),
-                    Some(Value::Data(d)) => hex(d),
+                    Some(Value::Data(d)) => blat(d),
+                    Some(Value::Float(f)) => fmt_flt(*f),
                     None => String::new(),
                 };
                 (s, pos + 1)
@@ -1661,12 +2213,18 @@ fn parse_comm_params(p: &[u8]) -> CommConfig {
     let u16le = |off: usize| -> u16 {
         if off + 1 < p.len() { u16::from_le_bytes([p[off], p[off + 1]]) } else { 0 }
     };
+    // K-line CommParameter (18-byte / 9× u16 LE) field layout:
+    //   [0] concept  [1] baud  [2] ecu_type  [3] -  [4] -  [5] ParTimeoutStd
+    //   [6] ParRegenTime  [7] ParTimeoutTelEnd  [8] ParInterbyteTime
+    // Field [8] is the inter-byte TX time (KWP2000 P4). Verified across the corpus:
+    // it is 0 for most concept-6 ECUs and non-zero (2..5) only for slow ones like
+    // DDE4.0 (=4) — the signature of an optional timing, NOT a header length.
     let concept        = u16le(0);
     let baud           = u16le(2) as u32;
     let timeout_std_ms = u16le(10) as u64;
     let regen_time_ms  = u16le(12) as u64;
     let timeout_tel_ms = u16le(14) as u64;
-    let hdr_len        = u16le(16) as usize;
+    let interbyte_ms   = u16le(16) as u64;
 
     let protocol = match concept {
         0x0001 | 0x0005 | 0x0006 => Protocol::Ds2,
@@ -1676,14 +2234,23 @@ fn parse_comm_params(p: &[u8]) -> CommConfig {
         _                        => Protocol::Ds2,
     };
 
+    // len_offset / len_add follow the DS2 frame concept (xawlen may refine later).
+    // concept 0x0006 = BMW DS2 4-byte header [FMT][TGT][SRC][LEN] → offset 3, add 5.
+    // concept 0x0001/0x0005 = 2-byte DS2 [ADDR][LEN] → offset 1, add 0.
+    let (len_offset, len_add) = match concept {
+        0x0006 => (3, 5),
+        _      => (1, 0),
+    };
+
     let mut cfg = CommConfig::default();
     cfg.protocol       = protocol;
     cfg.baud           = baud;
-    cfg.len_offset     = if hdr_len > 0 { hdr_len - 1 } else { 1 };
-    cfg.len_add        = 0; // overridden by subsequent xawlen
+    cfg.len_offset     = len_offset;
+    cfg.len_add        = len_add;
     cfg.timeout_std_ms = if timeout_std_ms > 0 { timeout_std_ms } else { 2000 };
     cfg.regen_time_ms  = if regen_time_ms  > 0 { regen_time_ms  } else { 20 };
     cfg.timeout_tel_ms = if timeout_tel_ms > 0 { timeout_tel_ms } else { 50 };
+    cfg.interbyte_ms   = interbyte_ms;   // from .prg ParInterbyteTime (P4)
     cfg
 }
 
@@ -1705,9 +2272,42 @@ fn nibble_size(nibble: u8, code: &[u8], pos: usize) -> usize {
                 2 + n
             } else { 2 }
         }
-        9 | 0xa => 2,     // IdxImm / IdxReg
-        0xb => 3,         // IdxRegImm
-        _ => 3,           // IdxImmLen* / IdxRegLen* — conservative
+        // Indexed addressing modes — byte counts per EdiabasLib GetOpArg (authoritative):
+        0x9 => 3,         // IdxImm       reg + u16 idx
+        0xa => 2,         // IdxReg       reg + reg
+        0xb => 4,         // IdxRegImm    reg + reg + u16 inc
+        0xc => 5,         // IdxImmLenImm reg + u16 idx + u16 len
+        0xd => 4,         // IdxImmLenReg reg + u16 idx + reg len
+        0xe => 4,         // IdxRegLenImm reg + reg + u16 len
+        _   => 3,         // IdxRegLenReg reg + reg + reg
+    }
+}
+
+/// Read an immediate operand (Imm8/16/32 addressing modes 5/6/7) as u32.
+fn read_imm_u32(code: &[u8], pos: usize, nib: u8) -> u32 {
+    match nib {
+        5 => code.get(pos).copied().unwrap_or(0) as u32,
+        6 => {
+            if pos + 1 < code.len() { u16::from_le_bytes([code[pos], code[pos + 1]]) as u32 }
+            else { 0 }
+        }
+        7 => {
+            if pos + 3 < code.len() {
+                u32::from_le_bytes([code[pos], code[pos + 1], code[pos + 2], code[pos + 3]])
+            } else { 0 }
+        }
+        _ => 0,
+    }
+}
+
+/// Operand data length (bytes) by addressing-mode nibble, for numeric operands.
+/// RegAB/Imm8 = 1, RegI/Imm16 = 2, RegL/Imm32 = 4; non-numeric modes = 0.
+fn nib_width(nib: u8) -> usize {
+    match nib {
+        2 | 5 => 1,
+        3 | 6 => 2,
+        4 | 7 => 4,
+        _ => 0,
     }
 }
 
@@ -1735,7 +2335,19 @@ fn parse_hex_str(s: &str) -> Vec<u8> {
 
 fn cstr(buf: &[u8]) -> String {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..end]).into_owned()
+    blat(&buf[..end])
+}
+
+/// Decode raw bytes into a String Latin-1 style (each byte → one char, 0..=255).
+/// This is byte-preserving: `unlat(blat(b)) == b`, so binary telegram data can pass
+/// through string registers without UTF-8 corruption.
+fn blat(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| b as char).collect()
+}
+
+/// Encode a Latin-1 String back to raw bytes (inverse of `blat`).
+fn unlat(s: &str) -> Vec<u8> {
+    s.chars().map(|c| c as u8).collect()
 }
 
 fn hex(bytes: &[u8]) -> String {

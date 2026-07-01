@@ -56,6 +56,13 @@ enum Command {
         /// LEN byte position in ECU response: 1=concept-0x0006, 2=concept-0x0001
         #[arg(long, default_value = "1")]
         len_offset: usize,
+        /// Inter-byte TX delay (ms). DDE4.0/classic DS2 need ~5ms (ParInterbyteTime).
+        #[arg(long, default_value = "5")]
+        interbyte: u64,
+        /// Optional job arguments (EDIABAS ArgString), ';'-separated, e.g. --args "1B;2A;3C".
+        /// Read by the job via par*/pary. Optional even if the job expects args.
+        #[arg(long, value_name = "A;B;C")]
+        args: Option<String>,
     },
 
     /// Send a K-line telegram via KDCAN STD:OBD adapter protocol
@@ -128,6 +135,9 @@ enum Command {
         /// Extra wait (ms) between end of TX/echo and start of reading ECU response
         #[arg(long, default_value = "0")]
         regen_ms: u64,
+        /// Inter-byte delay (ms) between each TX byte. DDE4.0 needs ~4ms (ParInterbyteTime).
+        #[arg(long, default_value = "0")]
+        interbyte: u64,
         /// Frame bytes to send (hex), e.g. "B8 12 F1 04 2C 10 0F 10"
         frame: String,
     },
@@ -156,7 +166,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
-        Command::Run { prg: prg_path, job, port, baud, kline_init, init_job, echo, len_offset } => {
+        Command::Run { prg: prg_path, job, port, baud, kline_init, init_job, echo, len_offset, interbyte, args } => {
+            let arg_buf: Vec<u8> = args.unwrap_or_default().into_bytes();
             let prg_file = prg::PrgFile::open(&prg_path).unwrap_or_else(|e| {
                 eprintln!("Error opening .prg: {e}"); std::process::exit(1);
             });
@@ -174,8 +185,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             eprintln!("Cannot open {dev}: {e}"); std::process::exit(1);
                         });
                     let mut ds2 = transport::ds2::Ds2Transport::new(Box::new(serial));
-                    ds2.echo = echo;
+                    // KDCAN/FTDI K-line adapters mirror TX back on RX — always drain the
+                    // echo so it can't be mistaken for (or shift) the ECU response.
+                    // (`--echo` kept for compatibility; draining is now unconditional.)
+                    let _ = echo;
+                    ds2.echo = true;
                     ds2.len_offset = len_offset;
+                    ds2.interbyte_ms = interbyte;
 
                     if let Some(hex_addr) = kline_init {
                         let addr = u8::from_str_radix(hex_addr.trim_start_matches("0x"), 16)
@@ -189,8 +205,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     let mut vm = vm::Vm::new(Box::new(ds2), tables);
+                    vm.set_args(arg_buf.clone());
 
-                    if let Some(init_name) = init_job {
+                    // Run the init job to configure the protocol (len_offset/len_add/
+                    // interbyte from CommParameter). Default to INITIALISIERUNG when the
+                    // .prg has it and none was given — most DS2 ECUs need it for correct
+                    // frame-length parsing (concept-6: len_offset=3, len_add=5).
+                    let init_name = init_job.or_else(||
+                        prg_file.job_code("INITIALISIERUNG").map(|_| "INITIALISIERUNG".to_string())
+                    );
+                    if let Some(init_name) = init_name {
                         let init_code = prg_file.job_code(&init_name).unwrap_or_else(|| {
                             eprintln!("Init job '{}' not found", init_name); std::process::exit(1);
                         });
@@ -203,6 +227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 None => {
                     let mut vm = vm::Vm::new(Box::new(transport::sim::NullTransport), tables);
+                    vm.set_args(arg_buf.clone());
                     vm.run_job(&code).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
                 }
             };
@@ -306,7 +331,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::Raw { port, baud, parity, echo, timeout, gap, init, wakeup_ms,
-                       rts_rx_low, rts, dtr, regen_ms, frame } => {
+                       rts_rx_low, rts, dtr, regen_ms, interbyte, frame } => {
             let parity_val = match parity.as_str() {
                 "none" => serialport::Parity::None,
                 _      => serialport::Parity::Even,
@@ -334,12 +359,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut ds2 = transport::ds2::Ds2Transport::new(Box::new(serial));
             ds2.echo = echo;
             ds2.regen_delay_ms = regen_ms;
+            ds2.interbyte_ms = interbyte;
             if rts_rx_low {
                 ds2.rts_rx_low = Some(true);
                 eprintln!("RTS half-duplex: HIGH during TX, LOW during RX");
             }
 
-            eprintln!("Port {} @ {} baud, parity={}, echo={}, regen_ms={}", port, baud, parity, echo, regen_ms);
+            eprintln!("Port {} @ {} baud, parity={}, echo={}, regen_ms={}, interbyte_ms={}", port, baud, parity, echo, regen_ms, interbyte);
 
             if wakeup_ms > 0 {
                 eprintln!("Wakeup: BREAK {}ms + idle {}ms", wakeup_ms, wakeup_ms);

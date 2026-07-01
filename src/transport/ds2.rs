@@ -37,6 +37,10 @@ pub struct Ds2Transport {
     pub rts_rx_low: Option<bool>,
     /// Extra delay (ms) between end of TX (and echo drain) and starting to read ECU response.
     pub regen_delay_ms: u64,
+    /// Inter-byte delay (ms) inserted between each transmitted byte.
+    /// DDE4.0 and some DS2 ECUs require ~4 ms spacing (ParInterbyteTime) or they ignore the frame.
+    /// 0 = send the whole frame at once (default).
+    pub interbyte_ms: u64,
 }
 
 impl Ds2Transport {
@@ -50,6 +54,7 @@ impl Ds2Transport {
             regen_time_ms: 20,
             rts_rx_low: None,
             regen_delay_ms: 0,
+            interbyte_ms: 0,
         }
     }
 
@@ -93,7 +98,17 @@ impl Ds2Transport {
         if self.rts_rx_low == Some(true) {
             let _ = self.driver.set_rts(true);
         }
-        self.driver.write(frame)?;
+        if self.interbyte_ms > 0 {
+            // Byte-by-byte TX with inter-byte spacing (ParInterbyteTime).
+            for (i, b) in frame.iter().enumerate() {
+                self.driver.write(&[*b])?;
+                if i + 1 < frame.len() {
+                    sleep(Duration::from_millis(self.interbyte_ms));
+                }
+            }
+        } else {
+            self.driver.write(frame)?;
+        }
         if self.echo {
             let mut echo_buf = vec![0u8; frame.len()];
             self.driver.read_exact(&mut echo_buf)?;
@@ -165,7 +180,10 @@ impl Ds2Transport {
             return Err(Error::Checksum { expected, got });
         }
 
-        Ok(rest[..remaining - 1].to_vec())
+        // EDIABAS result byte-positions index into the FULL response telegram
+        // (header included), and jobs validate the header bytes. Return the whole
+        // frame minus the trailing CHK, not just the payload.
+        Ok(all[..chk_idx].to_vec())
     }
 
     /// K-line 5-baud initialization (ISO 9141-2).
@@ -229,6 +247,7 @@ impl Transport for Ds2Transport {
         self.len_add = cfg.len_add;
         self.timeout_std_ms = cfg.timeout_std_ms;
         self.regen_time_ms = cfg.regen_time_ms;
+        self.interbyte_ms = cfg.interbyte_ms;
         self.driver.set_timeout(cfg.timeout_std_ms)
     }
 

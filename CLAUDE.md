@@ -11,15 +11,19 @@ Rust-реализация полноценного интерпретатора 
 > Архитектурное следствие: `vm.rs` и `ds2.rs` проектируются как публичное API библиотеки.  
 > GUI будет управлять VM и получать `ResultSet` асинхронно.
 
-**Текущий фокус:** отладка DS2 транспорта на ЭБУ DDE4.0 через KDCAN USB-адаптер.
+**Текущий фокус:** публичное API библиотеки (`ediabas` crate) для использования из GUI —
+`Session::open()` → `initialize()` → `run_job()` со структурированным `JobResult`.
 
 ## ВАЖНО — читай перед работой
 
-**`PLAN.md`** в корне проекта — обязательный документ. Содержит полный план разработки  
+**`docs/PLAN.md`** — обязательный документ. Содержит полный план разработки  
 по этапам (0→4): от DS2 транспорта до GUI. Перед любой новой задачей:
-1. Открой `PLAN.md`
+1. Открой `docs/PLAN.md`
 2. Найди текущий этап (чекбоксы `[ ]` / `[x]`)
 3. Работай в рамках этапа, не перепрыгивай вперёд без завершения текущего
+
+Прочие доки в `docs/`: `BEST2-DECODER.md` (спека декодера), `EDC15C-COMMS.md`,
+`RESEARCH.md`. EDIABAS-тулзы (`xtract`, `bestinfo`, `Best2`) — в `Bin/` (gitignored).
 
 ## Контекст
 
@@ -48,21 +52,37 @@ DRIVER — только сырые байты: читает/пишет, set_brea
 
 ## Структура файлов
 
+Crate = **lib + bin**: `[lib] name="ediabas"` (`src/lib.rs`) + `[[bin]] name="ediabas-prg"` (`src/main.rs`).
+GUI/другие бинарники подключают `ediabas` как зависимость и работают через `Session`.
+
 ```
 src/
-  main.rs          — CLI (clap): команды info/jobs/sim/run/raw
+  lib.rs           — корень библиотеки: pub use Session/JobResult/ResultSet/Value/PrgFile/Error
+  session.rs       — ВЫСОКОУРОВНЕВОЕ API: Session::open → initialize → run_job → JobResult
+  main.rs          — CLI (clap): команды info/jobs/sim/run/raw (использует ediabas::…)
   prg.rs           — парсер .prg файлов (хедер, job table, XOR decode 0xF7, таблицы данных)
-  vm.rs            — BEST/2 VM (~1700 строк): Vm { transport: Box<dyn Transport> }
+  vm.rs            — BEST/2 VM (~2200 строк): Vm { transport: Box<dyn Transport> }
   error.rs         — Error enum, Result<T>
   config.rs        — CommConfig, Protocol enum
-  driver/
-    mod.rs         — trait Driver (set_timeout, write, read_exact, read_some, set_break)
-    serial.rs      — SerialDriver (FTDI/KDCAN через serialport crate)
-    mock.rs        — MockDriver (in-memory, для тестов)
-  transport/
-    mod.rs         — trait Transport (configure, init_connection, exchange, disconnect)
-    ds2.rs         — Ds2Transport (DS2 K-line протокол поверх Box<dyn Driver>)
-    sim.rs         — SimTransport (.SIM файлы), NullTransport
+  driver/          — trait Driver + SerialDriver (FTDI/KDCAN) / MockDriver
+  transport/       — trait Transport + Ds2Transport (DS2 K-line) / SimTransport / NullTransport
+docs/              — PLAN.md, BEST2-DECODER.md, EDC15C-COMMS.md, RESEARCH.md
+Bin/  (gitignored) — EDIABAS-тулзы: xtract.exe, bestinfo.exe, Best2.exe …
+ecu/  (gitignored) — .prg файлы ЭБУ
+```
+
+### Публичное API (для GUI) — `session.rs`
+
+```rust
+use ediabas::Session;
+
+let mut s = Session::open("COM3", 9600, "ecu/DDE40KW0.prg")?;
+s.initialize()?;                                   // запускает INITIALISIERUNG
+let res = s.run_job("MW_SELECT_LESEN_NORM", "0F30")?;  // структурированный JobResult
+let v = res.get_f64("STAT_armM_List_WERT");        // → Some(480.0)
+for set in res.sets() {
+    for (name, val) in set.iter() { /* … */ }
+}
 ```
 
 ## Сборка и запуск

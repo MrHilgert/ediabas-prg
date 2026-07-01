@@ -1,0 +1,146 @@
+//! Structured job results returned by [`crate::Session`].
+
+use std::collections::HashMap;
+
+use crate::vm::Value;
+
+/// All result sets produced by one job run (EDIABAS "Sätze"). The system set
+/// carries `JOB_STATUS`; data sets carry the measured/decoded results.
+#[derive(Debug, Clone, Default)]
+pub struct JobResult {
+    sets: Vec<ResultSet>,
+}
+
+impl JobResult {
+    pub(crate) fn new(sets: Vec<ResultSet>) -> Self {
+        JobResult { sets }
+    }
+
+    /// All result sets, in order.
+    pub fn sets(&self) -> &[ResultSet] {
+        &self.sets
+    }
+
+    /// Iterate over the result sets.
+    pub fn iter(&self) -> std::slice::Iter<'_, ResultSet> {
+        self.sets.iter()
+    }
+
+    /// True if no set contains any result.
+    pub fn is_empty(&self) -> bool {
+        self.sets.iter().all(ResultSet::is_empty)
+    }
+
+    /// The `JOB_STATUS` string (usually `"OKAY"` on success), across all sets.
+    pub fn job_status(&self) -> Option<String> {
+        self.get_str("JOB_STATUS")
+    }
+
+    /// First result named `name` across all sets, as a raw [`Value`].
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.sets.iter().find_map(|s| s.get(name))
+    }
+
+    /// First result named `name` as an integer.
+    pub fn get_i64(&self, name: &str) -> Option<i64> {
+        self.sets.iter().find_map(|s| s.get_i64(name))
+    }
+
+    /// First result named `name` as a float.
+    pub fn get_f64(&self, name: &str) -> Option<f64> {
+        self.sets.iter().find_map(|s| s.get_f64(name))
+    }
+
+    /// First result named `name` as a display string.
+    pub fn get_str(&self, name: &str) -> Option<String> {
+        self.sets.iter().find_map(|s| s.get_str(name))
+    }
+
+    /// First result named `name` as raw bytes.
+    pub fn get_bytes(&self, name: &str) -> Option<Vec<u8>> {
+        self.sets.iter().find_map(|s| s.get_bytes(name))
+    }
+}
+
+impl<'a> IntoIterator for &'a JobResult {
+    type Item = &'a ResultSet;
+    type IntoIter = std::slice::Iter<'a, ResultSet>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.sets.iter()
+    }
+}
+
+/// One EDIABAS result set (Satz): named results mapped to [`Value`]s.
+#[derive(Debug, Clone, Default)]
+pub struct ResultSet {
+    map: HashMap<String, Value>,
+}
+
+impl ResultSet {
+    pub(crate) fn from_map(map: HashMap<String, Value>) -> Self {
+        ResultSet { map }
+    }
+
+    /// Raw value of result `name`.
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.map.get(name)
+    }
+
+    /// Whether this set contains a result named `name`.
+    pub fn contains(&self, name: &str) -> bool {
+        self.map.contains_key(name)
+    }
+
+    /// Number of results in the set.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Whether the set has no results.
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Result names in this set.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.map.keys().map(String::as_str)
+    }
+
+    /// Iterate over `(name, value)` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.map.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Result `name` as an integer (parses strings, truncates floats).
+    pub fn get_i64(&self, name: &str) -> Option<i64> {
+        self.map.get(name).map(|v| match v {
+            Value::Long(n) => *n as i64,
+            Value::Float(f) => *f as i64,
+            Value::Str(s) => s.trim().parse().unwrap_or(0),
+            Value::Data(_) => 0,
+        })
+    }
+
+    /// Result `name` as a float (parses strings; accepts `,` or `.` decimals).
+    pub fn get_f64(&self, name: &str) -> Option<f64> {
+        self.map.get(name).map(|v| match v {
+            Value::Float(f) => *f,
+            Value::Long(n) => *n as f64,
+            Value::Str(s) => s.trim().replace(',', ".").parse().unwrap_or(0.0),
+            Value::Data(_) => 0.0,
+        })
+    }
+
+    /// Result `name` as a display string.
+    pub fn get_str(&self, name: &str) -> Option<String> {
+        self.map.get(name).map(|v| v.to_string())
+    }
+
+    /// Result `name` as raw bytes (for binary results; others are stringified).
+    pub fn get_bytes(&self, name: &str) -> Option<Vec<u8>> {
+        self.map.get(name).map(|v| match v {
+            Value::Data(d) => d.clone(),
+            other => other.to_string().into_bytes(),
+        })
+    }
+}

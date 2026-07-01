@@ -3,6 +3,17 @@ name = "ediabas-prg"
 version = "0.1.0"
 edition = "2024"
 
+# Library crate `ediabas` — the reusable API (Session, jobs, transport, VM).
+# GUI / other binaries depend on this.
+[lib]
+name = "ediabas"
+path = "src/lib.rs"
+
+# CLI binary `ediabas-prg` — thin wrapper over the library.
+[[bin]]
+name = "ediabas-prg"
+path = "src/main.rs"
+
 [dependencies]
 clap    = { version = "4", features = ["derive"] }
 serialport = "4"

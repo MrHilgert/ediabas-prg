@@ -18,6 +18,7 @@ use std::time::Duration;
 use crate::config::CommConfig;
 use crate::driver::Driver;
 use crate::error::{Error, Result};
+use crate::trace::trace;
 use super::Transport;
 
 pub struct Ds2Transport {
@@ -191,50 +192,50 @@ impl Ds2Transport {
     pub fn kline_5baud_init(&mut self, ecu_addr: u8) -> Result<()> {
         const BIT_MS: u64 = 200;
 
-        eprintln!("  [5baud] idle HIGH...");
+        trace!("  [5baud] idle HIGH...");
         self.driver.set_break(false)?;
         sleep(Duration::from_millis(300));
 
-        eprintln!("  [5baud] start bit LOW");
+        trace!("  [5baud] start bit LOW");
         self.driver.set_break(true)?;
         sleep(Duration::from_millis(BIT_MS));
 
         for bit_pos in 0..8u8 {
             let bit = (ecu_addr >> bit_pos) & 1;
-            eprintln!("  [5baud] bit {bit_pos} = {bit}");
+            trace!("  [5baud] bit {bit_pos} = {bit}");
             self.driver.set_break(bit == 0)?;
             sleep(Duration::from_millis(BIT_MS));
         }
 
-        eprintln!("  [5baud] stop bit HIGH");
+        trace!("  [5baud] stop bit HIGH");
         self.driver.set_break(false)?;
         sleep(Duration::from_millis(BIT_MS));
-        eprintln!("  [5baud] 5-baud address sent");
+        trace!("  [5baud] 5-baud address sent");
 
         self.driver.set_timeout(3000)?;
-        eprintln!("  [5baud] waiting for sync byte 0x55...");
+        trace!("  [5baud] waiting for sync byte 0x55...");
         let mut sync = [0u8; 1];
         loop {
             self.driver.read_exact(&mut sync)?;
-            eprintln!("  [5baud] got byte: {:#04x}", sync[0]);
+            trace!("  [5baud] got byte: {:#04x}", sync[0]);
             if sync[0] == 0x55 { break; }
         }
 
         let mut w1 = [0u8; 1];
         let mut w2 = [0u8; 1];
         self.driver.read_exact(&mut w1)?;
-        eprintln!("  [5baud] W1={:#04x}", w1[0]);
+        trace!("  [5baud] W1={:#04x}", w1[0]);
         self.driver.read_exact(&mut w2)?;
-        eprintln!("  [5baud] W2={:#04x}", w2[0]);
+        trace!("  [5baud] W2={:#04x}", w2[0]);
 
         sleep(Duration::from_millis(25));
         let inv_w2 = !w2[0];
-        eprintln!("  [5baud] sending ~W2={inv_w2:#04x}");
+        trace!("  [5baud] sending ~W2={inv_w2:#04x}");
         self.driver.write(&[inv_w2])?;
         self.driver.read_exact(&mut sync)?;
-        eprintln!("  [5baud] echo: {:#04x}", sync[0]);
+        trace!("  [5baud] echo: {:#04x}", sync[0]);
         self.driver.read_exact(&mut sync)?;
-        eprintln!("K-line init complete: ECU addr={:#04x}", sync[0]);
+        trace!("K-line init complete: ECU addr={:#04x}", sync[0]);
 
         self.driver.set_timeout(self.timeout_std_ms)?;
         Ok(())
@@ -258,13 +259,13 @@ impl Transport for Ds2Transport {
 
     fn exchange(&mut self, frame: &[u8]) -> Result<Vec<u8>> {
         let with_chk = Self::append_checksum(frame);
-        eprintln!("TX: {}", fmt_hex(&with_chk));
+        trace!("TX: {}", fmt_hex(&with_chk));
         self.send_raw(&with_chk)?;
         self.driver.set_timeout(self.timeout_std_ms)?;
         let resp = self.receive();
         match &resp {
-            Ok(r)  => eprintln!("RX: {}", fmt_hex(r)),
-            Err(e) => eprintln!("RX err: {e}"),
+            Ok(r)  => trace!("RX: {}", fmt_hex(r)),
+            Err(e) => trace!("RX err: {e}"),
         }
         resp
     }

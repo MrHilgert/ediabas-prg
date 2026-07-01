@@ -2,13 +2,7 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
 
-mod config;
-mod driver;
-mod error;
-mod prg;
-mod transport;
-mod vm;
-
+use ediabas::{driver, prg, transport, vm};
 use driver::Driver as _;
 use transport::Transport as _;
 

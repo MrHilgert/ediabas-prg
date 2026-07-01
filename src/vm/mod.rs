@@ -35,68 +35,17 @@ use std::collections::HashMap;
 use crate::config::{CommConfig, Protocol};
 use crate::transport::Transport;
 use crate::prg::Table;
+use crate::trace::{trace, vtrace};
 
-#[derive(Debug, Clone)]
-pub enum Value {
-    Long(i32),
-    Str(String),
-    Data(Vec<u8>),
-    /// BEST/2 float register (stored in S-registers). 64-bit double.
-    Float(f64),
-}
+mod decode;
+mod value;
 
-impl Value {
-    pub fn as_long(&self) -> i32 {
-        match self {
-            Value::Long(v) => *v,
-            Value::Str(s) => s.trim().parse().unwrap_or(0),
-            Value::Float(f) => *f as i32,
-            Value::Data(_) => 0,
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        match self {
-            Value::Str(s) => s,
-            _ => "",
-        }
-    }
-
-    pub fn as_data(&self) -> &[u8] {
-        match self {
-            Value::Data(d) => d,
-            Value::Str(s) => s.as_bytes(),
-            Value::Long(_) | Value::Float(_) => &[],
-        }
-    }
-}
-
-impl std::fmt::Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Value::Long(v) => write!(f, "{v}"),
-            Value::Str(s) => write!(f, "{s}"),
-            Value::Data(d) => write!(f, "{}", hex(d)),
-            Value::Float(v) => write!(f, "{}", fmt_flt(*v)),
-        }
-    }
-}
-
-/// Parse an ASCII number (BEST/2 a2flt source) to f64. Accepts ',' or '.' decimals.
-fn parse_f64(s: &str) -> f64 {
-    s.trim().replace(',', ".").parse().unwrap_or(0.0)
-}
-
-/// Format a float the way EDIABAS results read: drop trailing ".0" for integers.
-fn fmt_flt(v: f64) -> String {
-    if v.fract() == 0.0 && v.abs() < 1e15 {
-        format!("{}", v as i64)
-    } else {
-        let s = format!("{:.6}", v);
-        let s = s.trim_end_matches('0').trim_end_matches('.');
-        s.to_string()
-    }
-}
+pub use value::Value;
+use value::{fmt_flt, parse_f64};
+use decode::{
+    blat, cstr, hex, nib_width, nibble_size, parse_hex_str, read_imm_u32,
+    read_long_at, read_str_at, reg_val_from_map, skip_instr, unlat,
+};
 
 pub type ResultSet = HashMap<String, Value>;
 
@@ -167,20 +116,24 @@ impl Vm {
     }
 
     pub fn run_job(&mut self, code: &[u8]) -> Result<Vec<ResultSet>, String> {
+        // Each job starts with a clean register/stack state (EDIABAS runs every
+        // apiJob fresh). Transport/protocol config lives in the transport, not
+        // here, so it survives across jobs in a Session.
+        self.regs.clear();
         self.stack.clear();
         self.call_stack.clear();
         let mut ip = 0usize;
         let mut current: ResultSet = HashMap::new();
         let mut sets: Vec<ResultSet> = Vec::new();
 
-        let trace = std::env::var("EDIABAS_TRACE").is_ok();
+        let trace = crate::trace::verbose();
         let mut steps: u64 = 0;
         while ip < code.len() {
             if code[ip] == 0xf7 { break; }
 
             steps += 1;
             if steps > 20_000_000 {
-                eprintln!("vm: instruction limit exceeded at ip={ip:#06x} — aborting (possible infinite loop)");
+                trace!("vm: instruction limit exceeded at ip={ip:#06x} — aborting (possible infinite loop)");
                 break;
             }
 
@@ -189,7 +142,7 @@ impl Vm {
                 let l0 = self.regs.get(&0x18).map(Value::as_long).unwrap_or(0);
                 let l1 = self.regs.get(&0x19).map(Value::as_long).unwrap_or(0);
                 let l2 = self.regs.get(&0x1a).map(Value::as_long).unwrap_or(0);
-                eprintln!("[trace] ip={ip:#06x} op={:#04x} : {:<17} L0={l0:#x} L1={l1:#x} L2={l2:#x} sp={}",
+                vtrace!("[trace] ip={ip:#06x} op={:#04x} : {:<17} L0={l0:#x} L1={l1:#x} L2={l2:#x} sp={}",
                           code[ip], hex(&code[ip..end]), self.stack.len());
             }
 
@@ -283,8 +236,8 @@ impl Vm {
                     let idx_val = reg_val_from_map(&self.regs, *idx).max(0) as usize;
                     let data = self.reg_bytes(src);
                     let byte_val = data.get(idx_val).copied().unwrap_or(0);
-                    if std::env::var("EDIABAS_TRACE").is_ok() {
-                        eprintln!("MOVB0 dst={:#04x} src=S{} idx={idx_val} byte={byte_val:#04x} data={:02X?}",
+                    if crate::trace::verbose() {
+                        vtrace!("MOVB0 dst={:#04x} src=S{} idx={idx_val} byte={byte_val:#04x} data={:02X?}",
                                   dst, src.wrapping_sub(0x1c), data);
                     }
                     self.set_byte_reg(*dst, byte_val);
@@ -404,9 +357,9 @@ impl Vm {
                         (reg_val_from_map(&self.regs, ir).max(0) as usize, ip + 5)
                     };
                     let value = self.read_sreg_value(base, offset, width);
-                    if std::env::var("EDIABAS_TRACE").is_ok() {
+                    if crate::trace::verbose() {
                         let src = self.reg_bytes(&base);
-                        eprintln!("MOVEIDX dst_reg={:#04x} base=S{} off={offset} w={width} val={value:#x} src={:02X?}",
+                        vtrace!("MOVEIDX dst_reg={:#04x} base=S{} off={offset} w={width} val={value:#x} src={:02X?}",
                                   dst, base.wrapping_sub(0x1c), src);
                     }
                     self.write_num_reg(hi, dst, value);
@@ -429,8 +382,8 @@ impl Vm {
                     if let Some((base, idx, len, next)) = self.read_slice_operand(lo, code, ip + 3) {
                         let src = self.reg_bytes(&base);
                         let slice: Vec<u8> = (0..len).map(|i| src.get(idx + i).copied().unwrap_or(0)).collect();
-                        if std::env::var("EDIABAS_TRACE").is_ok() {
-                            eprintln!("SLICE dst=S{} base=S{} idx={idx} len={len} src_len={} slice={:02X?}",
+                        if crate::trace::verbose() {
+                            vtrace!("SLICE dst=S{} base=S{} idx={idx} len={len} src_len={} slice={:02X?}",
                                       dst.wrapping_sub(0x1c), base.wrapping_sub(0x1c), src.len(), slice);
                         }
                         self.regs.insert(dst, Value::Data(slice));
@@ -1378,7 +1331,7 @@ impl Vm {
                                 let ci = t.col_index(&col_name)?;
                                 t.find_row(ci, &search_val)
                             });
-                        if std::env::var("EDIABAS_TRACE").is_ok() {
+                        if crate::trace::enabled() {
                             let sample: Vec<String> = self.active_table.as_ref()
                                 .and_then(|tn| self.tables.get(tn.as_str()))
                                 .map(|t| {
@@ -1387,7 +1340,7 @@ impl Vm {
                                         .map(|r| ci.and_then(|c| r.get(c)).cloned().unwrap_or_default())
                                         .collect()
                                 }).unwrap_or_default();
-                            eprintln!("TABSEEK tab={:?} col={col_name} key={search_val:?} found={found:?} adr_sample={sample:?}",
+                            trace!("TABSEEK tab={:?} col={col_name} key={search_val:?} found={found:?} adr_sample={sample:?}",
                                       self.active_table);
                         }
                         self.found_row = found;
@@ -1429,8 +1382,8 @@ impl Vm {
                                 Some(t.cell(ri, ci).to_string())
                             })
                             .unwrap_or_default();
-                        if std::env::var("EDIABAS_TRACE").is_ok() {
-                            eprintln!("TABGET [{col_name}] → {val:?}");
+                        if crate::trace::enabled() {
+                            trace!("TABGET [{col_name}] → {val:?}");
                         }
                         self.regs.insert(*dst, Value::Str(val));
                     }
@@ -1493,11 +1446,11 @@ impl Vm {
                 // xsend with register source: 2a 11 DST SRC (send string reg as binary)
                 [0x2a, 0x11, dst, src, ..] => {
                     let data = self.reg_bytes(src);
-                    eprintln!("XSEND telegram ({} bytes): {}", data.len(),
+                    trace!("XSEND telegram ({} bytes): {}", data.len(),
                         data.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "));
                     let response = self.transport.exchange(&data)
                         .map_err(|e| format!("xsend failed: {e}"))?;
-                    eprintln!("XSEND response ({} bytes): {}", response.len(),
+                    trace!("XSEND response ({} bytes): {}", response.len(),
                         response.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "));
                     self.regs.insert(*dst, Value::Data(response));
                     ip += 4;
@@ -1516,7 +1469,7 @@ impl Vm {
                 [0x2b, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); }
                 [0x2c, ..] if ip + 1 < code.len() => {
                     let next = skip_instr(code, ip);
-                    eprintln!("[xrequf@{ip:#x}] raw bytes: {}",
+                    trace!("[xrequf@{ip:#x}] raw bytes: {}",
                         code[ip..next].iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "));
                     ip = next;
                 }
@@ -1548,11 +1501,11 @@ impl Vm {
                     let n = (*nn_lo as usize) | ((*nn_hi as usize) << 8);
                     if n >= 18 && ip + 4 + n <= code.len() {
                         self.comm_cfg = parse_comm_params(&code[ip + 4..ip + 4 + n]);
-                        eprintln!("[xsetpar] concept={:?} baud={} len_offset={} interbyte_ms={} (from .prg)",
+                        trace!("[xsetpar] concept={:?} baud={} len_offset={} interbyte_ms={} (from .prg)",
                             self.comm_cfg.protocol, self.comm_cfg.baud, self.comm_cfg.len_offset,
                             self.comm_cfg.interbyte_ms);
                         if let Err(e) = self.transport.configure(&self.comm_cfg) {
-                            eprintln!("[xsetpar@{ip:#x}] configure failed: {e}");
+                            trace!("[xsetpar@{ip:#x}] configure failed: {e}");
                         }
                     }
                     ip += 4 + n;
@@ -1565,10 +1518,10 @@ impl Vm {
                         let p = &code[ip + 4..ip + 4 + n];
                         self.comm_cfg.len_offset = (-(p[0] as i8)) as usize;
                         self.comm_cfg.len_add    = p[2] as usize;
-                        eprintln!("[xawlen] len_offset={} len_add={}",
+                        trace!("[xawlen] len_offset={} len_add={}",
                             self.comm_cfg.len_offset, self.comm_cfg.len_add);
                         if let Err(e) = self.transport.configure(&self.comm_cfg) {
-                            eprintln!("[xawlen@{ip:#x}] configure failed: {e}");
+                            trace!("[xawlen@{ip:#x}] configure failed: {e}");
                         }
                     }
                     ip += 4 + n;
@@ -1635,8 +1588,8 @@ impl Vm {
                         let reg = code[ip + 2];
                         let (pos_val, next) = self.read_typed_operand(lo, code, ip + 3);
                         let value = self.stack_atsp(pos_val as usize, width);
-                        if std::env::var("EDIABAS_TRACE").is_ok() {
-                            eprintln!("ATSP reg={:#04x} pos={pos_val} w={width} val={value:#x} stacklen={}",
+                        if crate::trace::verbose() {
+                            vtrace!("ATSP reg={:#04x} pos={pos_val} w={width} val={value:#x} stacklen={}",
                                       reg, self.stack.len());
                         }
                         self.write_num_reg(hi, reg, value);
@@ -1807,7 +1760,7 @@ impl Vm {
 
                 // ── unknown: use MODE to skip correctly ───────────────────────
                 _ => {
-                    eprintln!(
+                    trace!(
                         "vm: unknown opcode {:#04x} at ip={ip:#06x} (context: {})",
                         code[ip],
                         hex(&code[ip..code.len().min(ip + 8)])
@@ -2121,91 +2074,6 @@ impl Vm {
 // ── free functions ────────────────────────────────────────────────────────────
 
 
-/// Read a value from the operand at `pos` based on MODE nibble.
-/// Read a numeric register value honouring the B/I → L register overlap
-/// (byte regs = bytes of L, word regs = words of L, long regs = direct).
-fn reg_val_from_map(regs: &HashMap<u8, Value>, reg: u8) -> i32 {
-    match reg {
-        0x00..=0x0f => {
-            let long_reg = REG_L0 + reg / 4;
-            let bp = (reg % 4) as u32;
-            (regs.get(&long_reg).map(Value::as_long).unwrap_or(0) >> (bp * 8)) & 0xff
-        }
-        0x10..=0x17 => {
-            let idx = reg - 0x10;
-            let long_reg = REG_L0 + idx / 2;
-            let wp = (idx % 2) as u32;
-            (regs.get(&long_reg).map(Value::as_long).unwrap_or(0) >> (wp * 16)) & 0xffff
-        }
-        _ => regs.get(&reg).map(Value::as_long).unwrap_or(0),
-    }
-}
-
-fn read_long_at(regs: &HashMap<u8, Value>, nibble: u8, code: &[u8], pos: usize) -> (i32, usize) {
-    match nibble {
-        0 => (0, pos),
-        1..=4 => {
-            if pos < code.len() {
-                (reg_val_from_map(regs, code[pos]), pos + 1)
-            } else { (0, pos + 1) }
-        }
-        5 => if pos < code.len() { (code[pos] as i32, pos + 1) } else { (0, pos + 1) },
-        6 => if pos + 1 < code.len() {
-            (u16::from_le_bytes([code[pos], code[pos+1]]) as i32, pos + 2)
-        } else { (0, pos + 2) },
-        7 => if pos + 3 < code.len() {
-            (i32::from_le_bytes([code[pos], code[pos+1], code[pos+2], code[pos+3]]), pos + 4)
-        } else { (0, pos + 4) },
-        8 => {
-            if pos + 1 < code.len() {
-                let n = code[pos] as usize | ((code[pos+1] as usize) << 8);
-                (0, pos + 2 + n)
-            } else { (0, pos) }
-        }
-        // Extended indexed modes — value not evaluated, but advance the correct size.
-        0x9 => (0, pos + 3),
-        0xa => (0, pos + 2),
-        0xb => (0, pos + 4),
-        0xc => (0, pos + 5),
-        0xd | 0xe => (0, pos + 4),
-        _   => (0, pos + 3),
-    }
-}
-
-/// Read a string operand from the given nibble.
-fn read_str_at(regs: &HashMap<u8, Value>, nibble: u8, code: &[u8], pos: usize) -> (String, usize) {
-    match nibble {
-        0 => (String::new(), pos),
-        1..=4 => {
-            if pos < code.len() {
-                let r = code[pos];
-                let s = match regs.get(&r) {
-                    Some(Value::Str(s)) => s.clone(),
-                    Some(Value::Long(v)) => v.to_string(),
-                    Some(Value::Data(d)) => blat(d),
-                    Some(Value::Float(f)) => fmt_flt(*f),
-                    None => String::new(),
-                };
-                (s, pos + 1)
-            } else { (String::new(), pos + 1) }
-        }
-        5 => if pos < code.len() { ((code[pos] as char).to_string(), pos + 1) } else { (String::new(), pos + 1) },
-        6 => if pos + 1 < code.len() { (String::new(), pos + 2) } else { (String::new(), pos + 2) },
-        7 => if pos + 3 < code.len() { (String::new(), pos + 4) } else { (String::new(), pos + 4) },
-        8 => {
-            if pos + 1 < code.len() {
-                let n = code[pos] as usize | ((code[pos+1] as usize) << 8);
-                let end = (pos + 2 + n).min(code.len());
-                let s = cstr(&code[pos+2..end]);
-                (s, pos + 2 + n)
-            } else { (String::new(), pos) }
-        }
-        9 | 0xa => (String::new(), pos + 2),
-        0xb     => (String::new(), pos + 3),
-        _       => (String::new(), pos + 3),
-    }
-}
-
 /// Parse a 18-byte EDIABAS CommParameter block into CommConfig.
 /// Layout: [concept u16][baud u16][ecu_type u16][0 u16][0 u16][timeout_std u16]
 ///         [regen u16][tel_end u16][hdr_len u16]  (all little-endian)
@@ -2254,102 +2122,3 @@ fn parse_comm_params(p: &[u8]) -> CommConfig {
     cfg
 }
 
-/// Compute how many extra bytes a MODE nibble occupies, given the current position.
-/// Basic types 0-8 are standard.  Extended indexed types 9-f:
-///   9 = IdxImm  : base_reg(1) + imm8(1)  = 2 bytes
-///   a = IdxReg  : base_reg(1) + idx_reg(1) = 2 bytes  (observed: 00 a2 ...)
-///   b = IdxRegImm: base_reg(1)+idx_reg(1)+imm8(1) = 3 bytes
-///   c-f = indexed-with-length variants; assume 3 bytes as safe minimum
-fn nibble_size(nibble: u8, code: &[u8], pos: usize) -> usize {
-    match nibble {
-        0 => 0,
-        1|2|3|4|5 => 1,
-        6 => 2,
-        7 => 4,
-        8 => {
-            if pos + 1 < code.len() {
-                let n = code[pos] as usize | ((code[pos+1] as usize) << 8);
-                2 + n
-            } else { 2 }
-        }
-        // Indexed addressing modes — byte counts per EdiabasLib GetOpArg (authoritative):
-        0x9 => 3,         // IdxImm       reg + u16 idx
-        0xa => 2,         // IdxReg       reg + reg
-        0xb => 4,         // IdxRegImm    reg + reg + u16 inc
-        0xc => 5,         // IdxImmLenImm reg + u16 idx + u16 len
-        0xd => 4,         // IdxImmLenReg reg + u16 idx + reg len
-        0xe => 4,         // IdxRegLenImm reg + reg + u16 len
-        _   => 3,         // IdxRegLenReg reg + reg + reg
-    }
-}
-
-/// Read an immediate operand (Imm8/16/32 addressing modes 5/6/7) as u32.
-fn read_imm_u32(code: &[u8], pos: usize, nib: u8) -> u32 {
-    match nib {
-        5 => code.get(pos).copied().unwrap_or(0) as u32,
-        6 => {
-            if pos + 1 < code.len() { u16::from_le_bytes([code[pos], code[pos + 1]]) as u32 }
-            else { 0 }
-        }
-        7 => {
-            if pos + 3 < code.len() {
-                u32::from_le_bytes([code[pos], code[pos + 1], code[pos + 2], code[pos + 3]])
-            } else { 0 }
-        }
-        _ => 0,
-    }
-}
-
-/// Operand data length (bytes) by addressing-mode nibble, for numeric operands.
-/// RegAB/Imm8 = 1, RegI/Imm16 = 2, RegL/Imm32 = 4; non-numeric modes = 0.
-fn nib_width(nib: u8) -> usize {
-    match nib {
-        2 | 5 => 1,
-        3 | 6 => 2,
-        4 | 7 => 4,
-        _ => 0,
-    }
-}
-
-/// Skip an instruction using the MODE byte to determine length.
-fn skip_instr(code: &[u8], ip: usize) -> usize {
-    if ip + 1 >= code.len() { return ip + 1; }
-    let mode = code[ip + 1];
-    let hi = mode >> 4;
-    let lo = mode & 0xf;
-    let mut pos = ip + 2;
-    pos += nibble_size(hi, code, pos);
-    pos += nibble_size(lo, code, pos);
-    pos
-}
-
-/// Parse a hex string like "B812F104" into a byte vec.
-fn parse_hex_str(s: &str) -> Vec<u8> {
-    let s = s.trim();
-    (0..s.len().saturating_sub(0))
-        .step_by(2)
-        .filter(|&i| i + 1 < s.len())
-        .filter_map(|i| u8::from_str_radix(&s[i..i+2], 16).ok())
-        .collect()
-}
-
-fn cstr(buf: &[u8]) -> String {
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    blat(&buf[..end])
-}
-
-/// Decode raw bytes into a String Latin-1 style (each byte → one char, 0..=255).
-/// This is byte-preserving: `unlat(blat(b)) == b`, so binary telegram data can pass
-/// through string registers without UTF-8 corruption.
-fn blat(bytes: &[u8]) -> String {
-    bytes.iter().map(|&b| b as char).collect()
-}
-
-/// Encode a Latin-1 String back to raw bytes (inverse of `blat`).
-fn unlat(s: &str) -> Vec<u8> {
-    s.chars().map(|c| c as u8).collect()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
-}

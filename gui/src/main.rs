@@ -9,10 +9,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod catalog;
 mod data;
 mod ecu;
 mod lang;
 mod screens;
+mod screens_gen;
 mod session_cfg;
 mod theme;
 mod worker;

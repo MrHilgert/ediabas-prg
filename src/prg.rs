@@ -166,6 +166,19 @@ impl Table {
     }
 }
 
+/// One measurable channel from the ECU's measurement table (BETRIEBSWTAB on DDE):
+/// a mnemonic, its 2C10 selector (PID), unit and description. `MW_SELECT_LESEN_NORM`
+/// with `selector` returns the value under `STAT_<name>_WERT`.
+#[derive(Debug, Clone)]
+pub struct Measurement {
+    pub name: String,
+    pub selector: String, // 4-hex-digit PID, e.g. "0F65"
+    pub unit: String,
+    pub label: String,    // long description (LNAME)
+    pub fact_a: f64,
+    pub fact_b: f64,
+}
+
 #[derive(Debug)]
 pub struct PrgFile {
     data: Vec<u8>,
@@ -279,6 +292,49 @@ impl PrgFile {
         }
 
         map
+    }
+
+    /// Measurable channels from the SGBD's measurement table (identified by its
+    /// NAME + ADR columns, `BETRIEBSWTAB` on DDE). Empty if the SGBD has none.
+    pub fn measurements(&self) -> Vec<Measurement> {
+        let tables = self.parse_tables();
+        let t = tables.values().find(|t| {
+            t.col_index("NAME").is_some()
+                && t.col_index("ADR").is_some()
+                && (t.col_index("MEAS").is_some() || t.col_index("TELEGRAM").is_some())
+        });
+        let Some(t) = t else { return vec![] };
+        let c_name = t.col_index("NAME").unwrap();
+        let c_adr = t.col_index("ADR").unwrap();
+        let (c_meas, c_ln, c_fa, c_fb) =
+            (t.col_index("MEAS"), t.col_index("LNAME"), t.col_index("FACT_A"), t.col_index("FACT_B"));
+        let cell = |r: &[String], c: Option<usize>| {
+            c.and_then(|i| r.get(i)).map_or(String::new(), |s| s.clone())
+        };
+        let num = |s: String| s.trim().replace(',', ".").parse::<f64>().unwrap_or(0.0);
+        t.rows
+            .iter()
+            .filter_map(|r| {
+                let name = r.get(c_name)?.clone();
+                let selector = r
+                    .get(c_adr)?
+                    .trim()
+                    .trim_start_matches("0x")
+                    .trim_start_matches("0X")
+                    .to_uppercase();
+                if name.is_empty() || selector.is_empty() {
+                    return None;
+                }
+                Some(Measurement {
+                    name,
+                    selector,
+                    unit: cell(r, c_meas),
+                    label: cell(r, c_ln),
+                    fact_a: num(cell(r, c_fa)),
+                    fact_b: num(cell(r, c_fb)),
+                })
+            })
+            .collect()
     }
 
     pub fn jobs(&self) -> Vec<JobEntry> {

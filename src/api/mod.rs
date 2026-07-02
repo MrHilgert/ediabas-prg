@@ -84,6 +84,13 @@ impl Session {
         self.prg.jobs().into_iter().map(|j| j.name).collect()
     }
 
+    /// Measurable channels (mnemonic → 2C10 selector, unit, description) from the
+    /// SGBD's measurement table. Use these to batch up to 10 selectors into one
+    /// `MW_SELECT_LESEN_NORM` request instead of one `STATUS_*` job per parameter.
+    pub fn measurements(&self) -> Vec<crate::prg::Measurement> {
+        self.prg.measurements()
+    }
+
     /// Whether the `.prg` defines a job with this name.
     pub fn has_job(&self, name: &str) -> bool {
         self.prg.job_code(name).is_some()

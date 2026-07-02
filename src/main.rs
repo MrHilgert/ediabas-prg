@@ -21,6 +21,9 @@ enum Command {
     /// List all jobs defined in the file
     Jobs { file: PathBuf },
 
+    /// Dump the SGBD lookup tables (to locate the measurement selector table)
+    Selectors { file: PathBuf },
+
     /// Run a job against a simulated ECU using an EDIABAS .SIM file
     Sim {
         #[arg(short, long)]
@@ -175,6 +178,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             prg::PrgFile::open(&file)
                 .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); })
                 .print_jobs()
+        }
+        Command::Selectors { file } => {
+            let prg = prg::PrgFile::open(&file)?;
+            let ms = prg.measurements(); // same path the GUI uses (Session::measurements)
+            let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+            eprintln!("measurements: {} channels", ms.len());
+            println!("[");
+            let n = ms.len();
+            for (i, m) in ms.iter().enumerate() {
+                let comma = if i + 1 < n { "," } else { "" };
+                println!(
+                    "  {{\"name\":\"{}\",\"selector\":\"{}\",\"unit\":\"{}\",\"desc\":\"{}\"}}{}",
+                    esc(&m.name), esc(&m.selector), esc(&m.unit), esc(&m.label), comma
+                );
+            }
+            println!("]");
+            Ok(())
         }
         Command::Sim { sim: sim_path, request } => {
             let mut ecu = transport::sim::SimTransport::load(&sim_path)?;

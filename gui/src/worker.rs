@@ -10,14 +10,16 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
-use ediabas::{JobResult, Session};
+use ediabas::{JobResult, Measurement, Session};
 
 /// UI → worker.
 pub enum Cmd {
     Connect { port: String, baud: u32, prg: String },
     RunJob { job: String, args: String },
-    /// Poll `job(args)` every `interval_ms` and stream back `JobDone` events.
-    StartStream { job: String, args: String, interval_ms: u64 },
+    /// Poll a LIST of `(job, args)` requests every `interval_ms`, merge their results
+    /// into one `JobResult`, and stream it back as a `JobDone` event. Mirrors INPA's
+    /// per-screen mix of batched `MW_SELECT_LESEN_NORM` and individual `STATUS_*` jobs.
+    StartStream { reqs: Vec<(String, String)>, interval_ms: u64 },
     StopStream,
     Disconnect,
     Shutdown,
@@ -25,7 +27,7 @@ pub enum Cmd {
 
 /// Worker → UI.
 pub enum Event {
-    Connected { jobs: Vec<String> },
+    Connected { jobs: Vec<String>, measurements: Vec<Measurement> },
     JobDone { job: String, result: JobResult },
     Error(String),
     Disconnected,
@@ -64,24 +66,26 @@ impl Drop for Worker {
 
 fn run(cmd_rx: Receiver<Cmd>, evt_tx: Sender<Event>, ctx: egui::Context) {
     let mut session: Option<Session> = None;
-    // (job, args, interval) while streaming.
-    let mut stream: Option<(String, String, Duration)> = None;
+    // (reqs, interval) while streaming — reqs are (job, args) run+merged per tick.
+    let mut stream: Option<(Vec<(String, String)>, Duration)> = None;
 
     loop {
         let wait = stream
             .as_ref()
-            .map(|(_, _, d)| *d)
+            .map(|(_, d)| *d)
             .unwrap_or(Duration::from_secs(3600));
 
         match cmd_rx.recv_timeout(wait) {
             Ok(cmd) => match cmd {
                 Cmd::Connect { port, baud, prg } => {
                     stream = None;
+                    session = None; // drop any prior session so it releases the port
                     match connect(&port, baud, &prg) {
                         Ok(s) => {
                             let jobs = s.jobs();
+                            let measurements = s.measurements();
                             session = Some(s);
-                            let _ = evt_tx.send(Event::Connected { jobs });
+                            let _ = evt_tx.send(Event::Connected { jobs, measurements });
                         }
                         Err(e) => {
                             session = None;
@@ -95,8 +99,13 @@ fn run(cmd_rx: Receiver<Cmd>, evt_tx: Sender<Event>, ctx: egui::Context) {
                     let _ = evt_tx.send(evt);
                     ctx.request_repaint();
                 }
-                Cmd::StartStream { job, args, interval_ms } => {
-                    stream = Some((job, args, Duration::from_millis(interval_ms.max(20))));
+                Cmd::StartStream { reqs, interval_ms } => {
+                    stream = Some((reqs, Duration::from_millis(interval_ms.max(20))));
+                    // Fire an immediate first poll so the page fills without waiting a tick.
+                    if let Some((reqs, _)) = stream.clone() {
+                        let _ = evt_tx.send(poll_reqs(session.as_mut(), &reqs));
+                        ctx.request_repaint();
+                    }
                 }
                 Cmd::StopStream => stream = None,
                 Cmd::Disconnect => {
@@ -108,15 +117,36 @@ fn run(cmd_rx: Receiver<Cmd>, evt_tx: Sender<Event>, ctx: egui::Context) {
                 Cmd::Shutdown => break,
             },
             Err(RecvTimeoutError::Timeout) => {
-                // Streaming tick: run one poll of the measurement job.
-                if let Some((job, args, _)) = stream.clone() {
-                    let evt = run_once(session.as_mut(), &job, &args);
-                    let _ = evt_tx.send(evt);
+                // Streaming tick: run every request of the current screen and merge.
+                if let Some((reqs, _)) = stream.clone() {
+                    let _ = evt_tx.send(poll_reqs(session.as_mut(), &reqs));
                     ctx.request_repaint();
                 }
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+/// Run every `(job, args)` request in order and merge their result sets into one
+/// `JobResult` (INPA polls a screen's params via a mix of MW_SELECT and STATUS_*).
+/// Errors on individual requests are skipped; only an all-failed poll surfaces an error.
+fn poll_reqs(session: Option<&mut Session>, reqs: &[(String, String)]) -> Event {
+    let Some(s) = session else { return Event::Error("not connected".into()) };
+    let mut merged: Option<JobResult> = None;
+    let mut last_err: Option<String> = None;
+    for (job, args) in reqs {
+        match s.run_job(job, args) {
+            Ok(r) => match &mut merged {
+                Some(acc) => acc.extend(r),
+                None => merged = Some(r),
+            },
+            Err(e) => last_err = Some(e.to_string()),
+        }
+    }
+    match merged {
+        Some(result) => Event::JobDone { job: "STREAM".to_string(), result },
+        None => Event::Error(last_err.unwrap_or_else(|| "no measurement requests".into())),
     }
 }
 
@@ -134,7 +164,44 @@ fn connect(port: &str, baud: u32, prg: &str) -> Result<Session, String> {
     let prg_path = resolve_prg(prg);
     let mut s = Session::open(port, baud, &prg_path).map_err(|e| e.to_string())?;
     s.initialize().map_err(|e| e.to_string())?;
+    // DS2 INITIALISIERUNG only configures comm parameters locally (xsetpar/xawlen)
+    // — it never sends a telegram, so it "succeeds" even with nothing on the bus.
+    // Prove the ECU is actually there by running a real identification job: it
+    // sends a request and a transport timeout ⇒ module absent / no link.
+    probe_presence(&mut s)?;
     Ok(s)
+}
+
+/// Liveness probe: run the first available identification job and require the ECU
+/// to answer for real. `Ok(())` only if a telegram round-trip actually succeeded;
+/// a timeout (no response) or an error status means the module isn't there.
+fn probe_presence(s: &mut Session) -> Result<(), String> {
+    // Standard BMW SGBD identification jobs, in preference order.
+    let job = ["IDENT", "IDENTIFIKATION", "INFO"]
+        .into_iter()
+        .find(|&j| s.has_job(j));
+    let Some(job) = job else {
+        // No known ident job to probe with — can't cheaply verify; accept the init.
+        return Ok(());
+    };
+    match s.run_job(job, "") {
+        Ok(r) => {
+            // Present if the SGBD reports OKAY, or (no JOB_STATUS) returned data.
+            let present = r
+                .job_status()
+                .map(|st| st.to_ascii_uppercase().contains("OKAY"))
+                .unwrap_or_else(|| !r.is_empty());
+            if present {
+                Ok(())
+            } else {
+                Err(format!(
+                    "ЭБУ не отвечает ({job}: {})",
+                    r.job_status().unwrap_or_else(|| "нет данных".into())
+                ))
+            }
+        }
+        Err(e) => Err(format!("ЭБУ не отвечает: {e}")),
+    }
 }
 
 /// Locate `ecu/<name>` regardless of the current working directory: try cwd,

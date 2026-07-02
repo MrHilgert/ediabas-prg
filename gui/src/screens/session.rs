@@ -6,12 +6,9 @@ use egui::{Align2, Color32, FontId, Key, Pos2, Rect, RichText, Sense, Stroke, Ve
 
 use super::{header, status_bar};
 use crate::app::{App, Screen};
-use crate::ecu::{code_hash, mods_for, Category, Module};
+use crate::ecu::{code_hash, mock_fault_count, mods_for, Category, Module};
 use crate::lang::{dict, Lang};
-use crate::session_cfg::{
-    fault_pool, screens_for, Block, FAction, Page, StreamParam, DDE_STREAM_ARGS, DDE_STREAM_JOB,
-    DDE_STREAM_PAGE,
-};
+use crate::session_cfg::{fault_pool, screens_for, Block, FAction, Page, StreamParam};
 use crate::theme::{palette, Colors};
 use crate::worker::{Cmd, Event, Worker};
 
@@ -53,14 +50,14 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         addr: m.addr,
         cat: m.cat,
         hash: code_hash(m.code),
-        faults: m.status().1,
+        faults: mock_fault_count(m.code),
     };
 
-    let screens = screens_for(&m);
+    let screens = screens_for(&m, &app.meas_groups);
     let cur_id = app.ses_stack.last().cloned().unwrap_or_else(|| "main".into());
-    let page = screens.get(&cur_id).or_else(|| screens.get("main")).unwrap();
+    let page = screens.pages.get(&cur_id).or_else(|| screens.pages.get("main")).unwrap();
 
-    // --- Real connection + live-stream lifecycle (DDE only for now) ---
+    // --- Real connection + live-stream lifecycle (any module with a real SGBD) ---
     let is_real = m.prg.is_some();
     // Drain worker events.
     if let Some(w) = &app.worker {
@@ -70,6 +67,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     app.connected = app.ecu_sel;
                     app.connect_pending = false;
                     app.status_msg.clear();
+                    // Build the .ipo-curated live measurement groups once for this connection.
+                    app.meas_groups =
+                        crate::session_cfg::build_meas_groups(app.ecu_sel.unwrap_or(""));
                 }
                 Event::JobDone { job, result } => {
                     if job == "FS_LESEN" {
@@ -111,24 +111,28 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             app.connect_attempted = true;
             app.connect_pending = true;
         }
-        // Stream MW_SELECT_LESEN_NORM only while on the DDE live page.
-        let on_stream = cur_id == DDE_STREAM_PAGE;
-        let want_stream = on_stream && app.connected == Some(code);
-        if want_stream && !app.streaming {
+        // Stream whatever poll the current page declares — a measurement group polls
+        // INPA's own request list (MW_SELECT_LESEN_NORM + STATUS_*). Start/stop/switch
+        // on change.
+        let desired = if app.connected == Some(code) {
+            screens.polls.get(&cur_id).cloned()
+        } else {
+            None
+        };
+        if desired != app.stream_poll {
             if let Some(w) = &app.worker {
-                w.send(Cmd::StartStream {
-                    job: DDE_STREAM_JOB.into(),
-                    args: DDE_STREAM_ARGS.into(),
-                    interval_ms: 110,
-                });
+                match &desired {
+                    Some((reqs, ms)) => {
+                        w.send(Cmd::StartStream { reqs: reqs.clone(), interval_ms: *ms })
+                    }
+                    None => w.send(Cmd::StopStream),
+                }
             }
-            app.streaming = true;
-        } else if !on_stream && app.streaming {
-            if let Some(w) = &app.worker {
-                w.send(Cmd::StopStream);
+            if desired.is_none() {
+                app.live = None;
             }
-            app.streaming = false;
-            app.live = None;
+            app.stream_poll = desired;
+            app.streaming = app.stream_poll.is_some();
         }
     }
 
@@ -182,7 +186,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     let crumbs: Vec<&str> = app
                         .ses_stack
                         .iter()
-                        .filter_map(|id| screens.get(id).map(|p| p.title.get(app.lang)))
+                        .filter_map(|id| screens.pages.get(id).map(|p| p.title.get(app.lang)))
                         .collect();
                     ui.add_space(12.0);
                     ui.label(RichText::new(crumbs.join(" › ")).size(10.0).color(c.fg_dim));

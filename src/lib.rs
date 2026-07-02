@@ -38,5 +38,5 @@ mod trace;
 
 pub use api::{JobResult, ResultSet, Session};
 pub use error::{Error, Result};
-pub use prg::PrgFile;
+pub use prg::{Measurement, PrgFile};
 pub use vm::Value;

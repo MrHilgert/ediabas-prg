@@ -21,6 +21,11 @@ impl JobResult {
         &self.sets
     }
 
+    /// Append another result's sets (used to merge several polled jobs into one view).
+    pub fn extend(&mut self, other: JobResult) {
+        self.sets.extend(other.sets);
+    }
+
     /// Iterate over the result sets.
     pub fn iter(&self) -> std::slice::Iter<'_, ResultSet> {
         self.sets.iter()

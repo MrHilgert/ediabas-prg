@@ -4,7 +4,7 @@
 
 use egui::{Align2, Color32, FontId, Pos2, RichText, Rounding, Sense, Stroke, Vec2};
 
-use super::{dot, header, status_bar, status_color};
+use super::{header, status_bar};
 use crate::app::App;
 use crate::data::{self, DATA, SERIES};
 use crate::lang::dict;
@@ -50,25 +50,6 @@ fn series_rail(app: &mut App, ctx: &egui::Context) {
                         }
                     }
                 }
-            });
-
-            // Legend pinned to the bottom.
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                ui.add_space(11.0);
-                for (col, label) in [
-                    (c.ok, d.lg_ready),
-                    (c.warn, d.lg_partial),
-                    (c.faint_dot, d.lg_none),
-                ] {
-                    ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        dot(ui, col, 8.0);
-                        ui.add_space(7.0);
-                        ui.label(RichText::new(label).size(10.0).color(c.fg_dim));
-                    });
-                    ui.add_space(7.0);
-                }
-                ui.separator();
             });
         });
 }
@@ -213,9 +194,8 @@ fn chassis_card(ui: &mut egui::Ui, app: &App, idx: usize) -> egui::Response {
     let r = rect.right() - 11.0;
     let mono = |sz: f32| FontId::monospace(sz);
 
-    // Header: code + status dot
+    // Header: code
     p.text(Pos2::new(l, rect.top() + 9.0), Align2::LEFT_TOP, ch.code, mono(21.0), c.fg);
-    p.circle_filled(Pos2::new(r - 4.0, rect.top() + 15.0), 4.0, status_color(&c, ch.status));
     // Model + years
     p.text(Pos2::new(l, rect.top() + 38.0), Align2::LEFT_TOP, ch.name(app.lang), mono(11.0), c.fg_dim);
     p.text(Pos2::new(l, rect.top() + 54.0), Align2::LEFT_TOP, ch.years, mono(11.0), c.fg_faint);

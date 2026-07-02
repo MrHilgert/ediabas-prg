@@ -7,12 +7,6 @@ use std::collections::HashMap;
 use crate::ecu::{Category, Module};
 use crate::lang::Lang;
 
-/// MW_SELECT_LESEN_NORM selector string for the DDE live stream (10 channels) —
-/// the known-good batch from the transport work.
-pub const DDE_STREAM_JOB: &str = "MW_SELECT_LESEN_NORM";
-pub const DDE_STREAM_ARGS: &str = "0F100F650F300F320F400F420F800F831F5D1F5E";
-pub const DDE_STREAM_PAGE: &str = "stream_sg_dde";
-
 /// Bilingual static label.
 #[derive(Clone, Copy)]
 pub struct Loc(pub &'static str, pub &'static str);
@@ -147,6 +141,69 @@ pub struct Page {
     pub keys: Vec<FKey>,
 }
 
+/// The page tree plus, for pages that show live data, the poll to run while active:
+/// a request LIST `(reqs, interval_ms)` where each `req = (job, args)` mirrors INPA's
+/// own call — `("MW_SELECT_LESEN_NORM", "<selector>")` or `("STATUS_*", "")`. The
+/// worker runs every req per tick and merges the results into one view.
+pub struct Screens {
+    pub pages: HashMap<String, Page>,
+    pub polls: HashMap<String, (Vec<(String, String)>, u64)>,
+}
+
+/// One INPA data-stream screen: the ordered params it displays (for the bars) plus
+/// the exact per-parameter job calls INPA issues (`reqs`), all from the ECU's `.ipo`
+/// (see `screens_gen::MeasScreen`). Built on connect by [`build_meas_groups`].
+#[derive(Clone)]
+pub struct MeasGroup {
+    pub id: String,
+    pub title: &'static str,
+    pub params: Vec<StreamParam>,
+    pub reqs: Vec<(String, String)>, // (job, arg) per parameter, in INPA's order
+}
+
+/// Build the live-measurement groups for a module code from the generated,
+/// `.ipo`-curated screens (`screens_gen::meas_screens`). Each INPA screen becomes one
+/// group; we replicate INPA's exact requests and bind each bar to its `STAT_*` result.
+/// Returns empty if the ECU has no extracted meas screens (caller falls back).
+pub fn build_meas_groups(code: &str) -> Vec<MeasGroup> {
+    crate::screens_gen::meas_screens(code)
+        .iter()
+        .enumerate()
+        .map(|(gi, sc)| {
+            let params = sc
+                .reqs
+                .iter()
+                .map(|r| {
+                    let (min, max, dec) = if r.lo == 0.0 && r.hi == 0.0 {
+                        range_for(r.unit, r.label)
+                    } else {
+                        (r.lo, r.hi, if r.hi - r.lo <= 20.0 { 2 } else { 0 })
+                    };
+                    StreamParam {
+                        label: Loc(r.label, r.label),
+                        unit: r.unit,
+                        base: 0.0,
+                        amp: 0.0,
+                        min,
+                        max,
+                        dec,
+                        is_bool: false,
+                        lo: None,
+                        hi: None,
+                        bind: Some(r.bind),
+                    }
+                })
+                .collect();
+            let reqs = sc
+                .reqs
+                .iter()
+                .map(|r| (r.job.to_string(), r.arg.to_string()))
+                .collect();
+            MeasGroup { id: format!("stream_meas_{gi}"), title: sc.title, params, reqs }
+        })
+        .collect()
+}
+
 /// Fault-description pool per category (prototype `FAULTDESC`).
 pub fn fault_pool(cat: Category) -> &'static [Loc] {
     match cat {
@@ -262,10 +319,95 @@ pub fn stream_groups(cat: Category) -> Vec<StreamGroup> {
     }
 }
 
-/// The full page tree for a module.
-pub fn screens_for(m: &Module) -> HashMap<String, Page> {
+/// Build live-stream bars from an extracted INPA screen: each row-column becomes a
+/// param bound to its result name (value + unit come from the polled `JobResult`;
+/// no data yet → "—"). Display ranges are label heuristics until real ranges arrive
+/// from the `.prg` measurement table (Phase 4).
+fn sg_stream_params(sc: &'static crate::screens_gen::SgScreen) -> Vec<StreamParam> {
+    let is_bool = matches!(sc.kind, crate::screens_gen::SgKind::Digital);
+    let mut out = Vec::new();
+    for row in sc.rows {
+        let cols = row.labels.len().max(row.results.len());
+        for i in 0..cols {
+            let label = row
+                .labels
+                .get(i)
+                .copied()
+                .filter(|s| !s.is_empty())
+                .or_else(|| row.results.get(i).copied())
+                .unwrap_or("");
+            // Always bound (never the mock-sine path): a real result name when the
+            // screen has one, else "" so the bar shows "—" until the value is polled.
+            let bind = Some(row.results.get(i).copied().unwrap_or(""));
+            let (min, max, dec) = range_for_label(label, is_bool);
+            out.push(StreamParam {
+                label: Loc(label, label),
+                unit: "",
+                base: 0.0,
+                amp: 0.0,
+                min,
+                max,
+                dec,
+                is_bool,
+                lo: None,
+                hi: None,
+                bind,
+            });
+        }
+    }
+    out
+}
+
+/// Coarse display range for bar scaling (the numeric value shown is always the exact
+/// polled value). Prefers the measurement unit, falls back to label keywords.
+fn range_for(unit: &str, label: &str) -> (f32, f32, u8) {
+    match unit.trim() {
+        "1/min" => return (0.0, 7000.0, 0),
+        "V" => return (0.0, 16.0, 1),
+        "%" => return (0.0, 100.0, 1),
+        "°C" | "grad C" | "GradC" => return (-40.0, 150.0, 0),
+        "bar" => return (0.0, 2000.0, 0),
+        "mbar" => return (0.0, 2500.0, 0),
+        "km/h" => return (0.0, 300.0, 0),
+        _ => {}
+    }
+    range_for_label(label, false)
+}
+
+/// Coarse display range from a measurement label (bar scaling only — the numeric
+/// value shown is always the exact polled value). Real ranges/units come from the
+/// `.prg` table later; this just keeps bars sensible meanwhile.
+fn range_for_label(label: &str, is_bool: bool) -> (f32, f32, u8) {
+    if is_bool {
+        return (0.0, 1.0, 0);
+    }
+    let l = label.to_lowercase();
+    let has = |ks: &[&str]| ks.iter().any(|k| l.contains(k));
+    if has(&["speed", "drehzahl", "rpm", "1/min", "оборот"]) {
+        (0.0, 7000.0, 0)
+    } else if has(&["temp", "°c", "temperatur", "температ", "коленвал"]) {
+        (-40.0, 150.0, 0)
+    } else if has(&["rail", "boost", "ladedruck", "pressure", "druck", "давлен", "наддув"]) {
+        (0.0, 2500.0, 0)
+    } else if has(&["volt", "spannung", "напряж"]) {
+        (0.0, 16.0, 1)
+    } else if has(&["mass", "masse", "luftmasse", "расход возд"]) {
+        (0.0, 900.0, 0)
+    } else if has(&["%", "percent", "prozent", "position", "pedal", "load", "last", "нагруз", "педал", "положен"]) {
+        (0.0, 100.0, 1)
+    } else if has(&["angle", "winkel", "угол"]) {
+        (-540.0, 540.0, 0)
+    } else {
+        (0.0, 100.0, 1)
+    }
+}
+
+/// The full page tree for a module, plus per-page live polls. `meas_groups` are the
+/// batched measurement groups built on connect (`build_meas_groups`); empty before
+/// connect or for ECUs without a measurement table.
+pub fn screens_for(m: &Module, meas_groups: &[MeasGroup]) -> Screens {
     let mut s = HashMap::new();
-    let groups = stream_groups_for(m);
+    let mut polls: HashMap<String, (Vec<(String, String)>, u64)> = HashMap::new();
 
     s.insert(
         "main".to_string(),
@@ -314,10 +456,69 @@ pub fn screens_for(m: &Module) -> HashMap<String, Page> {
         },
     );
 
-    let stream_menu: Vec<MenuItem> = groups
-        .iter()
-        .map(|g| MenuItem { label: g.name, to: format!("stream_{}", g.id) })
-        .collect();
+    // --- Data-stream section ("Поток данных") --------------------------------
+    // Our structure is populated by the ECU's real INPA display screens
+    // (Digital / Analog n / Status) extracted from its `.ipo` — this is INPA's own
+    // measurement layout, adapted into our page. The mock category groups are a
+    // fallback only for ECUs with no extracted `.ipo`. The DDE reference additionally
+    // keeps its live 10-channel group (MW_SELECT) until its analog rows bind (Phase 4).
+    let back = || FKey { f: 6, label: loc("НАЗАД", "BACK"), act: FAction::Back };
+    let have_meas = !meas_groups.is_empty();
+    let mut stream_menu: Vec<MenuItem> = Vec::new();
+
+    // 1) INPA's own curated, grouped data-stream screens (from the ECU's .ipo). Each
+    //    group polls the exact per-parameter job calls INPA issues (a mix of batched
+    //    MW_SELECT_LESEN_NORM and individual STATUS_*), merged into one view per tick.
+    for g in meas_groups {
+        stream_menu.push(MenuItem { label: Loc(g.title, g.title), to: g.id.clone() });
+        s.insert(
+            g.id.clone(),
+            Page {
+                title: Loc(g.title, g.title),
+                blocks: vec![Block::Stream(g.params.clone())],
+                keys: vec![back()],
+            },
+        );
+        polls.insert(g.id.clone(), (g.reqs.clone(), 140));
+    }
+
+    // 2) INPA digital/status screens keep the ECU's own layout (bars, bound to results).
+    //    Analog screens are shown only when there's no live measurement table (they're
+    //    label-only until bound); otherwise the batched groups above supersede them.
+    if let Some(sg) = crate::screens_gen::get(m.code) {
+        use crate::screens_gen::SgKind;
+        for (i, sc) in sg.screens.iter().enumerate() {
+            let keep = match sc.kind {
+                SgKind::Digital | SgKind::Status => true,
+                SgKind::Analog => !have_meas,
+                _ => false,
+            };
+            if !keep {
+                continue;
+            }
+            let pid = format!("stream_inpa_{i}");
+            let title = Loc(sc.title, sc.title);
+            stream_menu.push(MenuItem { label: title, to: pid.clone() });
+            s.insert(
+                pid,
+                Page { title, blocks: vec![Block::Stream(sg_stream_params(sc))], keys: vec![back()] },
+            );
+        }
+    }
+
+    // 3) Fallback: mock category groups only when there's neither a measurement table
+    //    nor an extracted INPA layout.
+    if !have_meas && crate::screens_gen::get(m.code).is_none() {
+        for g in stream_groups_for(m) {
+            let pid = format!("stream_{}", g.id);
+            stream_menu.push(MenuItem { label: g.name, to: pid.clone() });
+            s.insert(
+                pid,
+                Page { title: g.name, blocks: vec![Block::Stream(g.params)], keys: vec![back()] },
+            );
+        }
+    }
+
     s.insert(
         "stream".into(),
         Page {
@@ -326,19 +527,9 @@ pub fn screens_for(m: &Module) -> HashMap<String, Page> {
                 Block::Note(loc("Выберите группу параметров.", "Select a parameter group.")),
                 Block::Menu(stream_menu),
             ],
-            keys: vec![FKey { f: 6, label: loc("НАЗАД", "BACK"), act: FAction::Back }],
+            keys: vec![back()],
         },
     );
-    for g in groups {
-        s.insert(
-            format!("stream_{}", g.id),
-            Page {
-                title: g.name,
-                blocks: vec![Block::Stream(g.params)],
-                keys: vec![FKey { f: 6, label: loc("НАЗАД", "BACK"), act: FAction::Back }],
-            },
-        );
-    }
 
     s.insert(
         "status".into(),
@@ -379,5 +570,5 @@ pub fn screens_for(m: &Module) -> HashMap<String, Page> {
         },
     );
 
-    s
+    Screens { pages: s, polls }
 }

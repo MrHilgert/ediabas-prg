@@ -1,6 +1,6 @@
 //! ECU model for screen 2 (ECU Select), ported from the prototype `CATS` / `MODS` +
-//! `modsFor()` (year-overlap + AWD filter) and `enrich()` (deterministic status/faults
-//! from a code hash — mock, until a real scan replaces it).
+//! `modsFor()` (year-overlap + AWD filter). Module status is real-only now: a
+//! module is connectable iff it has a real SGBD (`.prg`); no fabricated health.
 
 use crate::data::Chassis;
 use crate::lang::Lang;
@@ -54,9 +54,11 @@ impl Category {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ModStatus {
-    Ok,
-    Fault,
-    NoLink,
+    /// Backed by a real SGBD (`.prg`) — connectable. Health is unknown until an
+    /// actual connect/scan runs (no fabricated status).
+    Ready,
+    /// No SGBD mapped for this entry yet — cannot be reached.
+    NoSgbd,
 }
 
 #[derive(Clone, Copy)]
@@ -70,9 +72,12 @@ pub struct Module {
     pub from: u32,
     pub to: u32,
     pub awd_only: bool,
-    /// Concrete SGBD for modules we can really talk to (currently DS2 only).
-    /// `Some(..)` marks a real, connectable module; `None` = mock catalog entry.
+    /// Concrete SGBD (.prg) mapped from the CFGDAT ENTRY script. `Some` = a real
+    /// SGBD exists on disk, so this module can be opened and initialised for real.
     pub prg: Option<&'static str>,
+    /// Confirmed connectable over an implemented transport (DS2, tested live).
+    /// Informational only now — real I/O is driven by `prg`, not this flag.
+    pub validated: bool,
 }
 
 impl Module {
@@ -83,13 +88,19 @@ impl Module {
         }
     }
 
-    /// Real modules (with a `.prg`) are deterministically OK/connectable;
-    /// the rest use the hash-based mock status.
-    pub fn status(&self) -> (ModStatus, u32) {
-        if self.prg.is_some() {
-            (ModStatus::Ok, 0)
+    /// Can this module be opened for real? True iff it has a real SGBD (`.prg`)
+    /// on disk — the session then runs its actual `INITIALISIERUNG`.
+    pub fn connectable(&self) -> bool {
+        self.prg.is_some()
+    }
+
+    /// Table/detail status. Purely reflects whether a real SGBD is available —
+    /// NO fabricated health (a real connect/scan will report Ok/faults later).
+    pub fn status(&self) -> ModStatus {
+        if self.connectable() {
+            ModStatus::Ready
         } else {
-            enrich(self.code)
+            ModStatus::NoSgbd
         }
     }
 }
@@ -97,11 +108,11 @@ impl Module {
 macro_rules! m {
     ($code:literal, $ru:literal, $en:literal, $cat:ident, $bus:literal, $addr:literal, $from:literal, $to:literal, awd) => {
         Module { code: $code, ru: $ru, en: $en, cat: Category::$cat, bus: $bus, addr: $addr,
-                 from: $from, to: $to, awd_only: true, prg: None }
+                 from: $from, to: $to, awd_only: true, prg: None, validated: false }
     };
     ($code:literal, $ru:literal, $en:literal, $cat:ident, $bus:literal, $addr:literal, $from:literal, $to:literal) => {
         Module { code: $code, ru: $ru, en: $en, cat: Category::$cat, bus: $bus, addr: $addr,
-                 from: $from, to: $to, awd_only: false, prg: None }
+                 from: $from, to: $to, awd_only: false, prg: None, validated: false }
     };
 }
 
@@ -164,17 +175,31 @@ fn engine_module(mark: &'static str, chassis: &str) -> Module {
         Module { code: mark, ru: "Двигатель · дизель", en: "Engine · diesel",
                  cat: Category::Pwr, bus: if ds2 { "DS2" } else { "D-CAN" }, addr: "0x12",
                  from: 0, to: 9999, awd_only: false,
-                 prg: if ds2 { Some("DDE40KW0.prg") } else { None } }
+                 prg: if ds2 { Some("DDE40KW0.prg") } else { None }, validated: ds2 }
     } else {
         Module { code: mark, ru: "Двигатель · бензин", en: "Engine · petrol",
                  cat: Category::Pwr, bus: "PT-CAN", addr: "0x12", from: 0, to: 9999,
-                 awd_only: false, prg: None }
+                 awd_only: false, prg: None, validated: false }
     }
 }
 
-/// Modules present on a chassis: the engine block expanded into this chassis'
-/// engine markings, then the non-engine static modules (year/AWD filtered).
+/// Build a Module from a CFGDAT catalog entry (bus/addr aren't in CFGDAT).
+fn catalog_module(e: &crate::catalog::CatEntry) -> Module {
+    Module {
+        code: e.code, ru: e.ru, en: e.en, cat: e.cat,
+        bus: if e.validated { "DS2" } else { "—" }, addr: "—",
+        from: 0, to: 9999, awd_only: false, prg: e.prg, validated: e.validated,
+    }
+}
+
+/// Modules present on a chassis. Prefer the real INPA CFGDAT catalog (categories,
+/// ECU list, engine markings, .prg mapping); fall back to the engine-marking
+/// generator + static modules for chassis not covered by CFGDAT.
 pub fn mods_for(ch: &Chassis) -> Vec<Module> {
+    let cat = crate::catalog::entries_for(ch.code);
+    if !cat.is_empty() {
+        return cat.iter().map(catalog_module).collect();
+    }
     let (y0, y1) = parse_years(ch.years);
     let awd = ch.drive.iter().any(|d| *d == "AWD");
     let mut out: Vec<Module> = ch.eng.iter().map(|&mark| engine_module(mark, ch.code)).collect();
@@ -195,16 +220,12 @@ pub fn code_hash(code: &str) -> u32 {
     h
 }
 
-/// Deterministic mock status + fault count from the module code hash
-/// (mirrors the prototype `enrich()`; real values come from an actual scan later).
-pub fn enrich(code: &str) -> (ModStatus, u32) {
+/// Placeholder DTC count for the still-mock session content (fault pages, badges).
+/// NOT a real scan — only used inside screen 3 until per-ECU jobs are wired.
+pub fn mock_fault_count(code: &str) -> u32 {
     let h = code_hash(code);
-    let r = h % 12;
-    if r == 0 {
-        (ModStatus::NoLink, 0)
-    } else if r < 3 {
-        (ModStatus::Fault, (h % 3) + 1)
-    } else {
-        (ModStatus::Ok, 0)
+    match h % 12 {
+        r if r < 3 => (h % 3) + 1,
+        _ => 0,
     }
 }

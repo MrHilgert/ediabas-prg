@@ -22,13 +22,21 @@ fn xor_decode(buf: &[u8]) -> Vec<u8> {
     buf.iter().map(|b| b ^ XOR_KEY).collect()
 }
 
+/// Decode bytes as ISO-8859-1 (Latin-1): every byte maps 1:1 to U+0000..=U+00FF,
+/// so it is lossless and never yields the U+FFFD replacement char. BMW SGBD text
+/// is CP1252/Latin-1 (umlauts ä ö ü ß = 0xE4/0xF6/0xFC/0xDF); `from_utf8_lossy`
+/// would destroy them. ASCII is unaffected.
+fn latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| b as char).collect()
+}
+
 /// Read a null-terminated string from `section` at `offset`.
 /// Returns (string, offset_after_null).
 fn read_cstring_at(section: &[u8], offset: usize) -> (String, usize) {
     let end = section[offset..].iter().position(|&b| b == 0)
         .map(|i| offset + i)
         .unwrap_or(section.len());
-    let s = String::from_utf8_lossy(&section[offset..end]).into_owned();
+    let s = latin1(&section[offset..end]);
     (s, end + 1)
 }
 
@@ -39,7 +47,7 @@ fn is_col_name(s: &str) -> bool {
 
 fn read_cstring(buf: &[u8]) -> String {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..end]).into_owned()
+    latin1(&buf[..end])
 }
 
 fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
@@ -55,11 +63,13 @@ fn parse_sgbd_fields(data: &[u8], off: usize) -> Vec<(String, String)> {
     let raw = &data[off + 4..];
     let limit = raw.len().min(512 * 1024);
     let dec = xor_decode(&raw[..limit]);
-    let text = String::from_utf8_lossy(&dec);
+    let text = latin1(&dec);
 
     text.split('\n')
         .map(|l| l.trim_end_matches('\r').trim_end_matches('\0'))
-        .filter(|l| l.contains(':') && l.chars().all(|c| c.is_ascii()))
+        // Keep printable lines (ASCII + Latin-1 letters like umlauts); drop binary
+        // junk by rejecting C0/C1 control chars. The key check below is the real guard.
+        .filter(|l| l.contains(':') && !l.chars().any(|c| c.is_control()))
         .filter_map(|l| {
             let (k, v) = l.split_once(':')?;
             let k = k.trim();

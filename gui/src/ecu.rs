@@ -177,7 +177,8 @@ fn catalog_module(e: &crate::catalog::CatEntry) -> Module {
         bus: if e.validated { "DS2" } else { "—" }, addr: "—",
         // The CFGDAT catalog `code` IS the INPA script name (e.g. "DDE40", "ascdsc46") →
         // its `SGDAT/<code>.ipo` is the screen source.
-        from: 0, to: 9999, awd_only: false, script: Some(e.code), prg: e.prg, validated: e.validated,
+        from: 0, to: 9999, awd_only: false, script: Some(e.code), prg: e.prg,
+        validated: e.validated,
     }
 }
 

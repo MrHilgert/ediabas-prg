@@ -13,7 +13,6 @@ use std::path::Path;
 use crate::driver::serial::SerialDriver;
 use crate::error::{Error, Result};
 use crate::prg::PrgFile;
-use crate::transport::ds2::Ds2Transport;
 use crate::vm::Vm;
 
 /// A live diagnostic session against one ECU over a serial K-line adapter.
@@ -26,23 +25,37 @@ pub struct Session {
 }
 
 impl Session {
-    /// Open serial port `port` at `baud` and load the ECU's `.prg` from `prg_path`.
+    /// Open adapter on `port` and load the ECU's `.prg` from `prg_path`.
     ///
-    /// This does not talk to the ECU yet — call [`Session::initialize`] next. The
-    /// DS2 transport is configured for KDCAN/FTDI adapters (TX echo is drained).
+    /// The transport is chosen **deterministically from the `.prg` itself**: we
+    /// statically read the ECU's communication concept from its `INITIALISIERUNG`
+    /// job ([`PrgFile::initial_comm_config`]) and build the matching transport
+    /// (DS2 / KWP2000 / BMW-FAST / KWP1281 / D-CAN) at the concept's own baud and
+    /// parity. `baud` is only a fallback used when the `.prg` declares none.
+    ///
+    /// This does not talk to the ECU yet — call [`Session::initialize`] next.
     pub fn open(port: &str, baud: u32, prg_path: impl AsRef<Path>) -> Result<Self> {
         let prg = PrgFile::open(prg_path.as_ref()).map_err(|e| Error::Prg(e.to_string()))?;
         let tables = prg.parse_tables();
 
-        let serial = SerialDriver::open_parity(port, baud, serialport::Parity::Even)?;
-        let mut ds2 = Ds2Transport::new(Box::new(serial));
-        // KDCAN/FTDI K-line adapters mirror TX back on RX — always drain the echo.
-        ds2.echo = true;
-        // Sensible pre-init inter-byte spacing; INITIALISIERUNG overrides it with
-        // the value from the .prg (ParInterbyteTime).
-        ds2.interbyte_ms = 5;
+        // Static concept probe → pick transport + serial params before any I/O.
+        let mut cfg = prg.initial_comm_config().unwrap_or_default();
+        if cfg.baud == 0 {
+            cfg.baud = baud;
+        }
 
-        let vm = Vm::new(Box::new(ds2), tables);
+        // K-line families open the serial at the concept's baud/parity. D-CAN reaches
+        // the CAN bus through the adapter's own control link (the D-CAN transport sets
+        // the CAN bitrate itself), so open the FTDI at its standard control baud.
+        let (serial_baud, parity) = if cfg.protocol.is_can() {
+            (115_200, serialport::Parity::None)
+        } else {
+            (cfg.baud, cfg.parity)
+        };
+        let serial = SerialDriver::open_parity(port, serial_baud, parity)?;
+
+        let transport = crate::transport::build(Box::new(serial), &cfg);
+        let vm = Vm::new(transport, tables);
         Ok(Session { prg, vm })
     }
 
@@ -94,5 +107,32 @@ impl Session {
     /// Whether the `.prg` defines a job with this name.
     pub fn has_job(&self, name: &str) -> bool {
         self.prg.job_code(name).is_some()
+    }
+
+    /// EDIABAS **variant identification**: when this session was opened on an
+    /// address-keyed *group* file (`Gruppendatei`, `ecu/D_<ADDR>.GRP` — the `.ipo`
+    /// names it, e.g. `KOMBI.ipo` → `D_0080`), run its identification job and return
+    /// the concrete variant SGBD name from the `VARIANTE` result (e.g. `IKE`,
+    /// `LCM_III`). The caller then re-opens on `<VARIANTE>.prg` for the actual session.
+    ///
+    /// This is exactly how INPA/EDIABAS pick the right SGBD: the group's ident job
+    /// reads the ECU and reports which variant it is. The BMW group files name the job
+    /// `IDENTIFIKATION`; `IDENT` is accepted as a fallback for the odd variant that
+    /// self-identifies. Returns:
+    /// - `Ok(Some(name))` — the group identified the variant,
+    /// - `Ok(None)` — no ident job, or no `VARIANTE` result: the loaded `.prg` is
+    ///   already the concrete SGBD, use it as-is.
+    ///
+    /// Runs a real telegram, so [`Session::initialize`] must have succeeded first.
+    pub fn identify_variant(&mut self) -> Result<Option<String>> {
+        let Some(job) = ["IDENTIFIKATION", "IDENT"].into_iter().find(|&j| self.has_job(j))
+        else {
+            return Ok(None);
+        };
+        let res = self.run_job(job, "")?;
+        Ok(res
+            .get_str("VARIANTE")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()))
     }
 }

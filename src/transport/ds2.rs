@@ -353,7 +353,8 @@ mod tests {
         let mut t = Ds2Transport::new(Box::new(driver));
         t.len_offset = 1;
         let resp = t.receive().unwrap();
-        // payload after header (2 bytes) and before CHK (1 byte)
-        assert_eq!(resp, &[0x61, 0x01, 0x02, 0x03]);
+        // receive() returns the whole telegram minus the trailing CHK (EDIABAS result
+        // byte-positions index into the full frame, header included).
+        assert_eq!(resp, &[0xB8, 0x07, 0x61, 0x01, 0x02, 0x03]);
     }
 }

@@ -110,7 +110,33 @@ pub(super) fn build(module: &Module, script: String) -> ScreenModule {
         .or_else(|| nodes.iter().position(|n| matches!(n, Node::Menu(_))))
         .unwrap_or(0);
 
-    ScreenModule { sgbd: sgbd_name(consts), script, root, nodes }
+    ScreenModule { sgbd: sgbd_name(consts), group_files: group_files(consts), script, root, nodes }
+}
+
+/// Address-keyed EDIABAS group files (`D_<ADDR>`) referenced by the script — the INPA
+/// variant-identification entry points. The `.ipo` const pool names them directly
+/// (e.g. `KOMBI.ipo` → `D_0080`; a cluster script spanning two diagnostic addresses
+/// carries both `D_000D` and `D_0080`). Each names `ecu/<name>.GRP`, whose
+/// `IDENTIFIKATION` job returns the concrete variant in result `VARIANTE`. Returned
+/// in first-seen order (deduplicated); the connect flow tries them in turn until one
+/// identifies. Empty when the script references no group (single-variant ECU).
+fn group_files(consts: &[Const]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in consts {
+        let Const::Str(s) = c else { continue };
+        let s = s.trim();
+        if is_group_file(s) && !out.iter().any(|x| x == s) {
+            out.push(s.to_string());
+        }
+    }
+    out
+}
+
+/// `D_` followed by exactly four hex digits (e.g. `D_0080`, `D_00D0`) — the EDIABAS
+/// address-keyed group-file naming convention.
+fn is_group_file(s: &str) -> bool {
+    let b = s.as_bytes();
+    s.len() == 6 && b[0] == b'D' && b[1] == b'_' && b[2..].iter().all(u8::is_ascii_hexdigit)
 }
 
 /// Map proc-record index → proc name (tag 0x05 only — never SCREEN/MENU).

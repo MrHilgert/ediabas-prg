@@ -168,6 +168,13 @@ for path in glob.glob(os.path.join(CFGDAT, "*")):
             continue
         script = parts[0]
         label = parts[1]
+        # Some CFGDAT files right-pad an EDIABAS group token into a fixed column of the
+        # label field: `ENTRY=<script>,<description>      <GROUP>,`. We don't use the
+        # group (variant identification is driven by the .ipo's `D_<ADDR>.GRP`), but we
+        # still strip that trailing ALL-CAPS token so it doesn't leak into the UI label.
+        m = re.search(r"\s{2,}([A-Z][A-Z0-9_]{1,15})\s*$", label)
+        if m:
+            label = label[: m.start()]
         if cur_chassis and cur_cat:
             add(cur_chassis, cur_cat, script, lang, label)
 

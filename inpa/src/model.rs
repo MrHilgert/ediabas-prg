@@ -10,8 +10,17 @@ pub type NodeId = usize;
 /// A parsed ECU screen module: the full page tree for one SGBD.
 #[derive(Debug, Clone)]
 pub struct ScreenModule {
-    /// SGBD name the screens drive (best-effort; may be empty).
+    /// SGBD name the screens drive (best-effort; may be empty). This is the FIRST
+    /// SGBD literal in the script — only correct for single-variant ECUs. For
+    /// multi-variant ECUs prefer [`ScreenModule::group_files`] variant identification.
     pub sgbd: String,
+    /// Address-keyed EDIABAS group files referenced by the `.ipo` (`D_<ADDR>`, e.g.
+    /// `D_0080`), the INPA variant-identification entry points: open
+    /// `ecu/<name>.GRP`, run job `IDENTIFIKATION`, read result `VARIANTE` → the
+    /// concrete variant SGBD to load. Usually one; sometimes several (a script
+    /// spanning two diagnostic addresses), tried in order. Empty when the script has
+    /// no group reference (single-variant ECU → use `sgbd` directly).
+    pub group_files: Vec<String>,
     /// INPA script name (usually the `.ipo` file stem).
     pub script: String,
     /// Entry menu (`m_main`).

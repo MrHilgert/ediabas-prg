@@ -374,11 +374,15 @@ fn drain_worker(app: &mut App) {
 fn lifecycle(app: &mut App, m: &Module, sm: &ScreenModule, ctx: &egui::Context) {
     let connectable = m.prg.is_some() && !sm.sgbd.is_empty();
     if connectable && app.connected != Some(m.code) && !app.connect_attempted {
-        let prg = format!("{}.prg", sm.sgbd); // the PRG comes from the .ipo
+        let prg = format!("{}.prg", sm.sgbd); // fallback SGBD from the .ipo
         // Port from settings (or first available if set to auto); fall back to COM3.
         let port = app.active_port().unwrap_or_else(|| "COM3".into());
+        // The `.ipo` names address-keyed group files (`D_<ADDR>`); the worker runs each
+        // group's IDENTIFIKATION → VARIANTE to resolve the concrete variant SGBD before
+        // opening the real session (INPA variant identification).
+        let groups = sm.group_files.clone();
         let w = app.worker.get_or_insert_with(|| Worker::spawn(ctx.clone()));
-        w.send(Cmd::Connect { port, baud: 9600, prg });
+        w.send(Cmd::Connect { port, baud: 9600, prg, groups });
         app.connect_attempted = true;
         app.connect_pending = true;
     }

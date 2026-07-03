@@ -32,7 +32,7 @@
 //   b0 xclose b1 xcloseex b2 xswitch b3 xsendex b4 xrecvex b5 ssize b6 tabcols b7 tabrows
 
 use std::collections::HashMap;
-use crate::config::{CommConfig, Protocol};
+use crate::config::CommConfig;
 use crate::transport::Transport;
 use crate::prg::Table;
 use crate::trace::{trace, vtrace};
@@ -1492,8 +1492,15 @@ impl Vm {
                 // xkeyb (2e) / xstate (2f) — no-op
                 [0x2f, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); }
 
-                // xconnect (26): port already open; CommConfig set by xsetpar/xawlen. Skip.
-                [0x26, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); }
+                // xconnect (26): port already open and CommConfig applied by the
+                // preceding xsetpar/xawlen. This is where the transport performs its
+                // physical init handshake (5-baud for KWP1281, fast-init for 0x010C).
+                // No-op for DS2/BMW-FAST/D-CAN. A failure here means the ECU is absent.
+                [0x26, ..] if ip + 1 < code.len() => {
+                    self.transport.init_connection()
+                        .map_err(|e| format!("xconnect failed: {e}"))?;
+                    ip = skip_instr(code, ip);
+                }
                 [0x27, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // xhangup
                 [0x30, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // xboot
                 [0x31, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // xreset
@@ -1507,7 +1514,9 @@ impl Vm {
                 [0x28, 0x80, nn_lo, nn_hi, ..] => {
                     let n = (*nn_lo as usize) | ((*nn_hi as usize) << 8);
                     if n >= 18 && ip + 4 + n <= code.len() {
-                        self.comm_cfg = parse_comm_params(&code[ip + 4..ip + 4 + n]);
+                        if let Some(cfg) = CommConfig::parse(&code[ip + 4..ip + 4 + n]) {
+                            self.comm_cfg = cfg;
+                        }
                         trace!("[xsetpar] concept={:?} baud={} len_offset={} interbyte_ms={} (from .prg)",
                             self.comm_cfg.protocol, self.comm_cfg.baud, self.comm_cfg.len_offset,
                             self.comm_cfg.interbyte_ms);
@@ -2078,54 +2087,4 @@ impl Vm {
     }
 }
 
-// ── free functions ────────────────────────────────────────────────────────────
-
-
-/// Parse a 18-byte EDIABAS CommParameter block into CommConfig.
-/// Layout: [concept u16][baud u16][ecu_type u16][0 u16][0 u16][timeout_std u16]
-///         [regen u16][tel_end u16][hdr_len u16]  (all little-endian)
-fn parse_comm_params(p: &[u8]) -> CommConfig {
-    let u16le = |off: usize| -> u16 {
-        if off + 1 < p.len() { u16::from_le_bytes([p[off], p[off + 1]]) } else { 0 }
-    };
-    // K-line CommParameter (18-byte / 9× u16 LE) field layout:
-    //   [0] concept  [1] baud  [2] ecu_type  [3] -  [4] -  [5] ParTimeoutStd
-    //   [6] ParRegenTime  [7] ParTimeoutTelEnd  [8] ParInterbyteTime
-    // Field [8] is the inter-byte TX time (KWP2000 P4). Verified across the corpus:
-    // it is 0 for most concept-6 ECUs and non-zero (2..5) only for slow ones like
-    // DDE4.0 (=4) — the signature of an optional timing, NOT a header length.
-    let concept        = u16le(0);
-    let baud           = u16le(2) as u32;
-    let timeout_std_ms = u16le(10) as u64;
-    let regen_time_ms  = u16le(12) as u64;
-    let timeout_tel_ms = u16le(14) as u64;
-    let interbyte_ms   = u16le(16) as u64;
-
-    let protocol = match concept {
-        0x0001 | 0x0005 | 0x0006 => Protocol::Ds2,
-        0x0002 | 0x0003          => Protocol::Kwp1281,
-        0x010F                   => Protocol::BmwFast,
-        0x0110                   => Protocol::DCan,
-        _                        => Protocol::Ds2,
-    };
-
-    // len_offset / len_add follow the DS2 frame concept (xawlen may refine later).
-    // concept 0x0006 = BMW DS2 4-byte header [FMT][TGT][SRC][LEN] → offset 3, add 5.
-    // concept 0x0001/0x0005 = 2-byte DS2 [ADDR][LEN] → offset 1, add 0.
-    let (len_offset, len_add) = match concept {
-        0x0006 => (3, 5),
-        _      => (1, 0),
-    };
-
-    let mut cfg = CommConfig::default();
-    cfg.protocol       = protocol;
-    cfg.baud           = baud;
-    cfg.len_offset     = len_offset;
-    cfg.len_add        = len_add;
-    cfg.timeout_std_ms = if timeout_std_ms > 0 { timeout_std_ms } else { 2000 };
-    cfg.regen_time_ms  = if regen_time_ms  > 0 { regen_time_ms  } else { 20 };
-    cfg.timeout_tel_ms = if timeout_tel_ms > 0 { timeout_tel_ms } else { 50 };
-    cfg.interbyte_ms   = interbyte_ms;   // from .prg ParInterbyteTime (P4)
-    cfg
-}
 

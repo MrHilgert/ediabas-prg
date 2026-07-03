@@ -14,7 +14,12 @@ use ediabas::{JobResult, Measurement, Session};
 
 /// UI → worker.
 pub enum Cmd {
-    Connect { port: String, baud: u32, prg: String },
+    /// Open a session. `prg` is the fallback SGBD (from the `.ipo`). `groups` are the
+    /// address-keyed EDIABAS group files the `.ipo` referenced (`D_<ADDR>`); when
+    /// present, the concrete SGBD is resolved by running each group's IDENTIFIKATION →
+    /// VARIANTE (INPA variant identification), in order, until one identifies. `prg` is
+    /// used if no group identifies or none are present.
+    Connect { port: String, baud: u32, prg: String, groups: Vec<String> },
     RunJob { job: String, args: String },
     /// Poll a LIST of `(job, args)` requests every `interval_ms`, merge their results
     /// into one `JobResult`, and stream it back as a `JobDone` event. Mirrors INPA's
@@ -80,10 +85,10 @@ fn run(cmd_rx: Receiver<Cmd>, evt_tx: Sender<Event>, ctx: egui::Context) {
 
         match cmd_rx.recv_timeout(wait) {
             Ok(cmd) => match cmd {
-                Cmd::Connect { port, baud, prg } => {
+                Cmd::Connect { port, baud, prg, groups } => {
                     stream = None;
                     session = None; // drop any prior session so it releases the port
-                    match connect(&port, baud, &prg) {
+                    match connect(&port, baud, &prg, &groups) {
                         Ok(s) => {
                             let jobs = s.jobs();
                             let measurements = s.measurements();
@@ -164,8 +169,14 @@ fn run_once(session: Option<&mut Session>, job: &str, args: &str) -> Event {
     }
 }
 
-fn connect(port: &str, baud: u32, prg: &str) -> Result<Session, String> {
-    let prg_path = resolve_prg(prg);
+fn connect(port: &str, baud: u32, prg: &str, groups: &[String]) -> Result<Session, String> {
+    // Phase 1 (INPA variant identification): if the .ipo referenced EDIABAS group
+    // files, run each group's IDENTIFIKATION to learn the concrete variant SGBD;
+    // otherwise fall back to `prg` (the .ipo's own SGBD).
+    let target = resolve_variant(port, baud, groups, prg);
+
+    // Phase 2: open the concrete SGBD for the real session.
+    let prg_path = resolve_prg(&target);
     let mut s = Session::open(port, baud, &prg_path).map_err(|e| e.to_string())?;
     s.initialize().map_err(|e| e.to_string())?;
     // DS2 INITIALISIERUNG only configures comm parameters locally (xsetpar/xawlen)
@@ -174,6 +185,31 @@ fn connect(port: &str, baud: u32, prg: &str) -> Result<Session, String> {
     // sends a request and a transport timeout ⇒ module absent / no link.
     probe_presence(&mut s)?;
     Ok(s)
+}
+
+/// INPA variant identification (phase 1). Try each address-keyed group file the
+/// `.ipo` referenced (`D_<ADDR>` → `ecu/D_<ADDR>.GRP`) in order: open it, run its
+/// `IDENTIFIKATION` job and, on the first that reports a variant, return
+/// `<VARIANTE>.prg` — the concrete SGBD the ECU is. A group whose file is missing, or
+/// that doesn't answer (wrong diagnostic address for this car — e.g. `D_000D` on an
+/// E39 whose cluster lives at `D_0080`), is skipped. Falls back to `fallback_prg`
+/// (the `.ipo`'s own SGBD) when nothing identifies. Each group session is dropped
+/// before the next attempt so it releases the serial port.
+fn resolve_variant(port: &str, baud: u32, groups: &[String], fallback_prg: &str) -> String {
+    for g in groups {
+        let grp_path = resolve_prg(&format!("{g}.GRP"));
+        if !grp_path.exists() {
+            continue;
+        }
+        let identified = Session::open(port, baud, &grp_path).and_then(|mut s| {
+            s.initialize()?;
+            s.identify_variant()
+        });
+        if let Ok(Some(variant)) = identified {
+            return format!("{variant}.prg");
+        }
+    }
+    fallback_prg.to_string()
 }
 
 /// Liveness probe: run the first available identification job and require the ECU

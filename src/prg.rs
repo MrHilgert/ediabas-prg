@@ -421,4 +421,33 @@ impl PrgFile {
 
         Some(xor_decode(&code_raw[start..end]))
     }
+
+    /// Statically determine the ECU's communication concept WITHOUT any I/O.
+    ///
+    /// The `INITIALISIERUNG` job configures the transport by executing `xsetpar`
+    /// with an 18-byte CommParameter block. That block carries the concept
+    /// (0x0006 DS2, 0x0110 D-CAN, 0x010F BMW-FAST, …), baud and timeouts — so we
+    /// can pick the right transport before ever touching the bus. We scan the
+    /// (already XOR-decoded) INITIALISIERUNG bytecode for the first
+    /// `xsetpar` opcode (`28 80 <len_lo> <len_hi> <payload>`) and parse its payload.
+    ///
+    /// Returns `None` if there is no INITIALISIERUNG job or no `xsetpar` in it
+    /// (caller should then fall back to the DS2 default).
+    pub fn initial_comm_config(&self) -> Option<crate::config::CommConfig> {
+        let code = self.job_code("INITIALISIERUNG")?;
+        let mut ip = 0usize;
+        while ip + 4 <= code.len() {
+            // xsetpar: 28 80 <n_lo> <n_hi> <n bytes CommParameter>
+            if code[ip] == 0x28 && code[ip + 1] == 0x80 {
+                let n = (code[ip + 2] as usize) | ((code[ip + 3] as usize) << 8);
+                if n >= 18 && ip + 4 + n <= code.len() {
+                    if let Some(cfg) = crate::config::CommConfig::parse(&code[ip + 4..ip + 4 + n]) {
+                        return Some(cfg);
+                    }
+                }
+            }
+            ip += 1;
+        }
+        None
+    }
 }

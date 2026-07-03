@@ -1,14 +1,14 @@
 //! Application state + eframe entry. Holds the selection/theme/lang state shared
 //! across screens, applies theme visuals each frame, and routes to the active screen.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::data::{self, DATA};
 use crate::ecu::Category;
 use crate::lang::Lang;
 use crate::screens;
 use crate::theme::{self, Theme};
-use crate::worker::{Cmd, Worker};
+use crate::worker::Worker;
 
 /// Register Inter as the UI font (modern, high-legibility, full Cyrillic),
 /// ahead of egui's thin default. Used for both proportional and monospace text
@@ -57,13 +57,17 @@ pub struct App {
     pub scan_pct: f32,                       // 0..100 module-scan animation
     pub connect_error: Option<String>,      // last connect failure → error popup on screen 2
 
-    // Session (screen 3) navigation state
-    pub ses_stack: Vec<String>,             // page-id stack; "main" at bottom
-    pub faults_read: bool,
-    pub faults_cleared: bool,
+    // Session (screen 3): the ECU's parsed .ipo screen tree + navigation.
+    pub module: Option<std::rc::Rc<inpa::ScreenModule>>, // loaded .ipo for the current ECU
+    pub module_for: Option<&'static str>,   // which ECU code `module` was loaded for
+    pub nav: Vec<crate::session::View>,     // view stack (menu + optional screen)
     pub fault_open: Option<String>,         // expanded fault code
+    pub info_for: Option<usize>,            // TextInfo screen whose feeder we've read once
+    pub info_tries: u8,                     // TextInfo feeder read attempts (bounded retry)
+    pub info_busy: bool,                    // a TextInfo feeder job is in flight
     pub faults: Option<ediabas::JobResult>, // real FS_LESEN result (DDE)
     pub faults_busy: bool,                  // an FS_LESEN/FS_LOESCHEN is in flight
+    pub faults_tries: u8,                   // auto-read attempts this visit (bounded retry)
 
     // Diagnostic worker (spun up on CONNECT). None until screen 2 connects.
     pub worker: Option<Worker>,
@@ -74,8 +78,12 @@ pub struct App {
     pub connect_attempted: bool,           // tried once this session (no retry spam)
     pub streaming: bool,                   // a StartStream is active
     pub live: Option<ediabas::JobResult>,  // latest polled measurement set
-    pub meas_groups: Vec<crate::session_cfg::MeasGroup>, // .ipo-curated live groups (built on connect)
     pub stream_poll: Option<(Vec<(String, String)>, u64)>, // active per-page poll: (reqs, interval_ms)
+    // Comms-activity pulse for the header link dot.
+    pub comms_seq: u64,                    // bumped on every completed exchange
+    pub comms_seen: u64,                   // last seq the header observed
+    pub comms_at: f64,                     // ctx time of that last change (for the fade)
+    pub comms_miss: u32,                   // consecutive streaming poll misses (transient)
 
     // Window
     pub fullscreen: bool,
@@ -106,12 +114,16 @@ impl App {
             ecu_sel: None,
             scan_pct: 0.0,
             connect_error: None,
-            ses_stack: vec!["main".into()],
-            faults_read: false,
-            faults_cleared: false,
+            module: None,
+            module_for: None,
+            nav: Vec::new(),
             fault_open: None,
+            info_for: None,
+            info_tries: 0,
+            info_busy: false,
             faults: None,
             faults_busy: false,
+            faults_tries: 0,
             worker: None,
             status_msg: String::new(),
             connected: None,
@@ -119,8 +131,11 @@ impl App {
             connect_attempted: false,
             streaming: false,
             live: None,
-            meas_groups: Vec::new(),
             stream_poll: None,
+            comms_seq: 0,
+            comms_seen: 0,
+            comms_at: 0.0,
+            comms_miss: 0,
             fullscreen: true,
             startup_frames: 3,
         }
@@ -141,9 +156,17 @@ impl App {
     /// page stack first, only leaving to ECU-select when already at the root page.
     pub fn go_back(&mut self) {
         match self.screen {
+            // Hierarchical back (not history): first close an open screen (→ its menu
+            // list), then climb to the parent menu, then leave to ECU-select.
             Screen::Session => {
-                if self.ses_stack.len() > 1 {
-                    self.ses_stack.pop();
+                if let Some(top) = self.nav.last_mut() {
+                    if top.screen.is_some() {
+                        top.screen = None;
+                        return;
+                    }
+                }
+                if self.nav.len() > 1 {
+                    self.nav.pop();
                 } else {
                     self.screen = Screen::Ecu;
                 }
@@ -153,17 +176,17 @@ impl App {
         }
     }
 
-    /// Reset the per-session view state (page stack + cached results) for a fresh module.
-    fn reset_session_view(&mut self) {
-        self.ses_stack = vec!["main".into()];
-        self.faults_read = false;
-        self.faults_cleared = false;
+    /// Reset the per-session view state (nav + cached results) for a fresh module.
+    pub fn reset_session_view(&mut self) {
+        self.nav.clear();
         self.fault_open = None;
+        self.info_for = None;
+        self.info_tries = 0;
+        self.info_busy = false;
         self.faults = None;
         self.faults_busy = false;
         self.streaming = false;
         self.live = None;
-        self.meas_groups.clear();
         self.stream_poll = None;
         self.status_msg.clear();
     }
@@ -183,26 +206,20 @@ impl App {
     /// successful `Connected` (a failed attempt keeps the user on screen 2 with an
     /// error popup). Modules without an SGBD can't be reached — report that plainly
     /// rather than opening a fake session.
-    pub fn start_connect(&mut self, ctx: &egui::Context) {
+    pub fn start_connect(&mut self, _ctx: &egui::Context) {
         self.reset_session_view();
         self.reset_connection();
+        self.module_for = None; // force the session screen to (re)load this ECU's .ipo
         let module = self.ecu_sel.and_then(|code| {
             self.selected_chassis()
                 .map(crate::ecu::mods_for)
                 .and_then(|v| v.into_iter().find(|m| m.code == code))
         });
-        match module.and_then(|m| m.prg) {
-            Some(prg) => {
-                let w = self.worker.get_or_insert_with(|| Worker::spawn(ctx.clone()));
-                w.send(Cmd::Connect { port: "COM3".into(), baud: 9600, prg: prg.to_string() });
-                self.connect_attempted = true;
-                self.connect_pending = true;
-                // Stay on Screen::Ecu — the session opens on the Connected event.
-            }
-            None => {
-                // No SGBD on disk → nothing to open. Surface it honestly.
-                self.connect_error = Some(crate::lang::dict(self.lang).no_sgbd.to_string());
-            }
+        match module {
+            // Any ECU with a screen script (.ipo) can open the session — its structure
+            // renders even without a transport; the link (if any) comes up in the session.
+            Some(m) if m.script.is_some() || m.prg.is_some() => self.screen = Screen::Session,
+            _ => self.connect_error = Some(crate::lang::dict(self.lang).no_sgbd.to_string()),
         }
     }
 
@@ -246,17 +263,8 @@ impl eframe::App for App {
         match self.screen {
             Screen::Chassis => screens::chassis_select::show(self, ctx),
             Screen::Ecu => screens::ecu_select::show(self, ctx),
-            Screen::Session => screens::session::show(self, ctx),
+            Screen::Session => crate::session::show(self, ctx),
         }
     }
 }
 
-/// UTC HH:MM:SS for the status-bar clock (local-tz formatting would need a dep).
-pub fn clock() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (h, m, s) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
-    format!("{h:02}:{m:02}:{s:02}")
-}

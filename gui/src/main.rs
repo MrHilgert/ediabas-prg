@@ -12,10 +12,10 @@ mod app;
 mod catalog;
 mod data;
 mod ecu;
+mod i18n;
 mod lang;
 mod screens;
-mod screens_gen;
-mod session_cfg;
+mod session;
 mod theme;
 mod worker;
 

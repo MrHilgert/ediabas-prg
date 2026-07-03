@@ -4,7 +4,7 @@
 
 use egui::{Align2, Color32, FontId, Pos2, RichText, Rounding, Sense, Stroke, Vec2};
 
-use super::{header, status_bar};
+use super::header;
 use crate::app::App;
 use crate::data::{self, DATA, SERIES};
 use crate::lang::dict;
@@ -12,7 +12,6 @@ use crate::theme::palette;
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
     header(app, ctx);
-    status_bar(app, ctx);
     series_rail(app, ctx);
     chassis_grid(app, ctx);
 }

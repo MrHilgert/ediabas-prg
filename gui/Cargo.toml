@@ -14,3 +14,5 @@ egui   = "0.29"
 # The diagnostic engine (Session / jobs / transport / VM).
 # Package is `ediabas-prg`; its [lib] is named `ediabas`.
 ediabas = { path = "..", package = "ediabas-prg" }
+# INPA .ipo screen parser → typed ScreenModule (the GUI constructor's data source).
+inpa = { path = "../inpa" }

@@ -2,12 +2,10 @@
 
 pub mod chassis_select;
 pub mod ecu_select;
-pub mod session;
 
 use egui::{Color32, RichText, Sense, Stroke, Vec2};
 
-use crate::app::{clock, App};
-use crate::data::Status;
+use crate::app::App;
 use crate::lang::{dict, Lang};
 use crate::theme::{palette, Colors, Theme};
 
@@ -17,11 +15,66 @@ pub fn dot(ui: &mut egui::Ui, color: Color32, d: f32) {
     ui.painter().circle_filled(rect.center(), d / 2.0, color);
 }
 
-pub fn status_color(c: &Colors, s: Status) -> Color32 {
-    match s {
-        Status::Ready => c.ok,
-        Status::Partial => c.warn,
-        Status::None => c.faint_dot,
+/// The connection lifecycle phase reflected by the header link chip.
+#[derive(Clone, Copy)]
+enum Link {
+    /// No attempt yet / disconnected quietly.
+    Idle,
+    /// `INITIALISIERUNG` in flight.
+    Pending,
+    /// Linked — winks on real comms.
+    Up,
+    /// Linked but the last poll(s) missed — values held, link not yet dropped.
+    Stall,
+    /// Link lost / error.
+    Down,
+}
+
+fn link_state(app: &App) -> Link {
+    if app.connect_pending {
+        Link::Pending
+    } else if app.connected.is_some() {
+        if app.comms_miss > 0 {
+            Link::Stall
+        } else {
+            Link::Up
+        }
+    } else if !app.status_msg.is_empty() {
+        Link::Down
+    } else {
+        Link::Idle
+    }
+}
+
+/// Colour of the header link dot: grey when idle, a breathing amber during
+/// INITIALISIERUNG, a bright green wink on each real exchange, solid red on loss.
+fn link_dot(app: &mut App, ctx: &egui::Context, c: &Colors, link: Link) -> Color32 {
+    let now = ctx.input(|i| i.time);
+    match link {
+        Link::Idle => c.fg_faint,
+        Link::Down => c.err,
+        Link::Stall => c.warn, // holding last values through a transient glitch
+
+        Link::Pending => {
+            let t = 0.5 + 0.5 * (now as f32 * 5.0).sin(); // slow breathe
+            ctx.request_repaint();
+            let bright = egui::Rgba::from(c.accent);
+            Color32::from(egui::lerp(bright * 0.3..=bright, t))
+        }
+        Link::Up => {
+            if app.comms_seq != app.comms_seen {
+                app.comms_seen = app.comms_seq;
+                app.comms_at = now;
+            }
+            // 1.0 right after an exchange → 0.0 after ~180 ms (a wink per completed poll).
+            let age = (now - app.comms_at) as f32;
+            let t = (1.0 - age / 0.18).clamp(0.0, 1.0);
+            if age < 0.6 {
+                ctx.request_repaint(); // keep the wink smooth while activity is fresh
+            }
+            let bright = egui::Rgba::from(c.ok);
+            Color32::from(egui::lerp(bright * 0.28..=bright, t))
+        }
     }
 }
 
@@ -58,7 +111,36 @@ fn seg2(
     picked
 }
 
-/// Top header: logo, title, interface chip, RU/EN + theme toggles. Shared by screens.
+/// A single icon toggle for the theme, painted with shapes so it needs no icon font
+/// (native-safe): a moon while Dark is active, a sun while Light is. Click flips the theme.
+fn theme_toggle(ui: &mut egui::Ui, c: &Colors, theme: Theme) -> Option<Theme> {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(44.0, 32.0), Sense::click());
+    let hovered = resp.hovered();
+    let bg = if hovered { c.panel2 } else { c.panel };
+    let p = ui.painter_at(rect);
+    p.rect(rect.shrink(0.5), egui::Rounding::same(4.0), bg, Stroke::new(1.0, c.stroke));
+    let ctr = rect.center();
+    let col = c.accent;
+    match theme {
+        // Moon: a disc with a bite carved out by a second, background-coloured disc.
+        Theme::Dark => {
+            p.circle_filled(ctr, 8.0, col);
+            p.circle_filled(ctr + Vec2::new(4.0, -3.0), 8.0, bg);
+        }
+        // Sun: a core disc with eight rays.
+        Theme::Light => {
+            p.circle_filled(ctr, 5.5, col);
+            for k in 0..8 {
+                let a = std::f32::consts::TAU * k as f32 / 8.0;
+                let dir = Vec2::new(a.cos(), a.sin());
+                p.line_segment([ctr + dir * 8.0, ctr + dir * 12.0], Stroke::new(1.8, col));
+            }
+        }
+    }
+    resp.clicked().then(|| if theme == Theme::Dark { Theme::Light } else { Theme::Dark })
+}
+
+/// Top header: wordmark, interface chip, RU/EN + theme toggles. Shared by screens.
 pub fn header(app: &mut App, ctx: &egui::Context) {
     let c = palette(app.theme);
     let d = dict(app.lang);
@@ -71,26 +153,13 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
         .frame(frame)
         .show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
-                // Logo placeholder "e/"
-                egui::Frame::none()
-                    .stroke(Stroke::new(1.0, c.stroke2))
-                    .rounding(3.0)
-                    .inner_margin(6.0)
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("e/").size(13.0).strong().color(c.accent));
-                    });
-                ui.add_space(12.0);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(RichText::new("eDIAG").size(14.0).strong().color(c.fg));
-                    ui.label(RichText::new(d.title_sub).size(9.0).color(c.fg_dim));
-                });
+                ui.label(RichText::new("eDIAG").size(15.0).strong().color(c.fg));
 
                 // Right cluster
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Theme toggle (☾ / ☀)
-                    if let Some(left) = seg2(ui, &c, "D", "L", app.theme == Theme::Dark) {
-                        app.theme = if left { Theme::Dark } else { Theme::Light };
+                    // Theme toggle — painted sun/moon (no icon font needed on native).
+                    if let Some(t) = theme_toggle(ui, &c, app.theme) {
+                        app.theme = t;
                     }
                     ui.add_space(8.0);
                     // Language toggle
@@ -98,7 +167,12 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                         app.lang = if left { Lang::Ru } else { Lang::En };
                     }
                     ui.add_space(12.0);
-                    // Interface chip (mock — TODO: real adapter/link state)
+                    // Interface chip — the single source of truth for link state: it winks
+                    // with real comms activity and shows the current lifecycle phase.
+                    // The dot alone conveys link state (grey idle / amber init / green
+                    // wink on comms / red loss) — no redundant status text.
+                    let link = link_state(app);
+                    let dot_col = link_dot(app, ctx, &c, link);
                     egui::Frame::none()
                         .fill(c.panel2)
                         .stroke(Stroke::new(1.0, c.stroke))
@@ -106,11 +180,10 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                         .inner_margin(egui::Margin::symmetric(11.0, 5.0))
                         .show(ui, |ui| {
                             ui.horizontal_centered(|ui| {
-                                dot(ui, c.ok, 8.0);
+                                dot(ui, dot_col, 8.0);
                                 ui.add_space(6.0);
                                 ui.label(RichText::new(d.interface).size(10.0).color(c.fg_dim));
-                                ui.label(RichText::new("· D-CAN ·").size(10.0).color(c.fg));
-                                ui.label(RichText::new(d.connected).size(10.0).strong().color(c.ok));
+                                ui.label(RichText::new("· D-CAN").size(10.0).color(c.fg));
                             });
                         });
                 });
@@ -118,38 +191,3 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
         });
 }
 
-/// Bottom status bar. `vbat`/`ping` shown as "—" until an actual session exists.
-pub fn status_bar(app: &App, ctx: &egui::Context) {
-    let c = palette(app.theme);
-    let d = dict(app.lang);
-    let frame = egui::Frame::none()
-        .fill(c.panel)
-        .inner_margin(egui::Margin::symmetric(12.0, 0.0));
-
-    egui::TopBottomPanel::bottom("status")
-        .exact_height(26.0)
-        .frame(frame)
-        .show(ctx, |ui| {
-            ui.horizontal_centered(|ui| {
-                let sep = |ui: &mut egui::Ui| {
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("│").size(10.0).color(c.stroke2));
-                    ui.add_space(10.0);
-                };
-                let dim = |s: String| RichText::new(s).size(10.0).color(c.fg_dim);
-                ui.label(dim(format!("{}: OBDLINK EX", d.adapter)));
-                sep(ui);
-                ui.label(dim("PROTO: DS2".into()));
-                sep(ui);
-                ui.label(dim("KL15: —".into()));
-                sep(ui);
-                ui.label(dim("VBAT: — V".into()));
-                sep(ui);
-                ui.label(dim("PING: — ms".into()));
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(dim(clock()));
-                });
-            });
-        });
-}

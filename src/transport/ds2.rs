@@ -258,6 +258,15 @@ impl Transport for Ds2Transport {
     }
 
     fn exchange(&mut self, frame: &[u8]) -> Result<Vec<u8>> {
+        // P3 (EDIABAS ParRegenerationTime): the ECU needs a minimum idle gap between the
+        // previous response and the next request, or it ignores the frame. Without this,
+        // back-to-back telegrams — fast streaming, then a one-off job like FS_LESEN fired
+        // right after a poll — time out. EDIABAS/INPA always honour it.
+        if self.regen_time_ms > 0 {
+            sleep(Duration::from_millis(self.regen_time_ms));
+        }
+        // Start each exchange from a clean RX FIFO (drop any residue/noise from the last one).
+        self.driver.flush_rx();
         let with_chk = Self::append_checksum(frame);
         trace!("TX: {}", fmt_hex(&with_chk));
         self.send_raw(&with_chk)?;

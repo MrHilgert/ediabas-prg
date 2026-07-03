@@ -26,6 +26,20 @@ impl JobResult {
         self.sets.extend(other.sets);
     }
 
+    /// Overlay another result's values onto this one — **newest values win**, collapsing to
+    /// a single set. Used to hold last-known values across streaming polls: a name missing
+    /// from `other` keeps its previous value, and repeated polls don't grow the set list.
+    pub fn overlay(&mut self, other: JobResult) {
+        let mut flat: HashMap<String, Value> = HashMap::new();
+        for set in self.sets.drain(..) {
+            flat.extend(set.map);
+        }
+        for set in other.sets {
+            flat.extend(set.map); // later inserts overwrite → newest wins
+        }
+        self.sets = vec![ResultSet { map: flat }];
+    }
+
     /// Iterate over the result sets.
     pub fn iter(&self) -> std::slice::Iter<'_, ResultSet> {
         self.sets.iter()
@@ -86,14 +100,18 @@ impl ResultSet {
         ResultSet { map }
     }
 
-    /// Raw value of result `name`.
+    /// Raw value of result `name`. Matching is **case-insensitive**, as in EDIABAS:
+    /// the SGBD (`.prg`) defines results in upper-case, but callers (`.ipo` screens,
+    /// jobs) may reference them in any case (e.g. `aif_fg_nr` vs `AIF_FG_NR`).
     pub fn get(&self, name: &str) -> Option<&Value> {
-        self.map.get(name)
+        self.map.get(name).or_else(|| {
+            self.map.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v)
+        })
     }
 
-    /// Whether this set contains a result named `name`.
+    /// Whether this set contains a result named `name` (case-insensitive, as EDIABAS).
     pub fn contains(&self, name: &str) -> bool {
-        self.map.contains_key(name)
+        self.map.contains_key(name) || self.map.keys().any(|k| k.eq_ignore_ascii_case(name))
     }
 
     /// Number of results in the set.
@@ -118,7 +136,7 @@ impl ResultSet {
 
     /// Result `name` as an integer (parses strings, truncates floats).
     pub fn get_i64(&self, name: &str) -> Option<i64> {
-        self.map.get(name).map(|v| match v {
+        self.get(name).map(|v| match v {
             Value::Long(n) => *n as i64,
             Value::Float(f) => *f as i64,
             Value::Str(s) => s.trim().parse().unwrap_or(0),
@@ -128,7 +146,7 @@ impl ResultSet {
 
     /// Result `name` as a float (parses strings; accepts `,` or `.` decimals).
     pub fn get_f64(&self, name: &str) -> Option<f64> {
-        self.map.get(name).map(|v| match v {
+        self.get(name).map(|v| match v {
             Value::Float(f) => *f,
             Value::Long(n) => *n as f64,
             Value::Str(s) => s.trim().replace(',', ".").parse().unwrap_or(0.0),
@@ -138,12 +156,12 @@ impl ResultSet {
 
     /// Result `name` as a display string.
     pub fn get_str(&self, name: &str) -> Option<String> {
-        self.map.get(name).map(|v| v.to_string())
+        self.get(name).map(|v| v.to_string())
     }
 
     /// Result `name` as raw bytes (for binary results; others are stringified).
     pub fn get_bytes(&self, name: &str) -> Option<Vec<u8>> {
-        self.map.get(name).map(|v| match v {
+        self.get(name).map(|v| match v {
             Value::Data(d) => d.clone(),
             other => other.to_string().into_bytes(),
         })

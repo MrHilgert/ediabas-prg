@@ -949,6 +949,7 @@ dependencies = [
  "ediabas-prg",
  "eframe",
  "egui",
+ "inpa",
 ]
 
 [[package]]
@@ -1688,6 +1689,10 @@ dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
 ]
+
+[[package]]
+name = "inpa"
+version = "0.1.0"
 
 [[package]]
 name = "io-kit-sys"

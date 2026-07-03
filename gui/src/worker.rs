@@ -29,6 +29,9 @@ pub enum Cmd {
 pub enum Event {
     Connected { jobs: Vec<String>, measurements: Vec<Measurement> },
     JobDone { job: String, result: JobResult },
+    /// A streaming poll produced no data (transient bus glitch). NOT fatal — the UI holds
+    /// the last values and the link, dropping only after several consecutive misses.
+    PollMiss(String),
     Error(String),
     Disconnected,
 }
@@ -146,7 +149,8 @@ fn poll_reqs(session: Option<&mut Session>, reqs: &[(String, String)]) -> Event 
     }
     match merged {
         Some(result) => Event::JobDone { job: "STREAM".to_string(), result },
-        None => Event::Error(last_err.unwrap_or_else(|| "no measurement requests".into())),
+        // A streaming poll that yielded nothing is a transient miss, not a disconnect.
+        None => Event::PollMiss(last_err.unwrap_or_else(|| "no data".into())),
     }
 }
 

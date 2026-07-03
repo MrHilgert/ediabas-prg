@@ -1,0 +1,7 @@
+[package]
+name = "inpa"
+version = "0.1.0"
+edition = "2021"
+description = "INPA .ipo compiled-screen parser — decodes to a typed ScreenModule"
+
+[dependencies]

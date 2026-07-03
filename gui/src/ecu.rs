@@ -52,15 +52,6 @@ impl Category {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ModStatus {
-    /// Backed by a real SGBD (`.prg`) — connectable. Health is unknown until an
-    /// actual connect/scan runs (no fabricated status).
-    Ready,
-    /// No SGBD mapped for this entry yet — cannot be reached.
-    NoSgbd,
-}
-
 #[derive(Clone, Copy)]
 pub struct Module {
     pub code: &'static str,
@@ -72,6 +63,9 @@ pub struct Module {
     pub from: u32,
     pub to: u32,
     pub awd_only: bool,
+    /// INPA `.ipo` screen-script name (hard-coded per ECU, the `SGDAT/<script>.ipo` stem).
+    /// The screen tree AND the SGBD/`.prg` to load are both derived from this `.ipo`.
+    pub script: Option<&'static str>,
     /// Concrete SGBD (.prg) mapped from the CFGDAT ENTRY script. `Some` = a real
     /// SGBD exists on disk, so this module can be opened and initialised for real.
     pub prg: Option<&'static str>,
@@ -94,25 +88,16 @@ impl Module {
         self.prg.is_some()
     }
 
-    /// Table/detail status. Purely reflects whether a real SGBD is available —
-    /// NO fabricated health (a real connect/scan will report Ok/faults later).
-    pub fn status(&self) -> ModStatus {
-        if self.connectable() {
-            ModStatus::Ready
-        } else {
-            ModStatus::NoSgbd
-        }
-    }
 }
 
 macro_rules! m {
     ($code:literal, $ru:literal, $en:literal, $cat:ident, $bus:literal, $addr:literal, $from:literal, $to:literal, awd) => {
         Module { code: $code, ru: $ru, en: $en, cat: Category::$cat, bus: $bus, addr: $addr,
-                 from: $from, to: $to, awd_only: true, prg: None, validated: false }
+                 from: $from, to: $to, awd_only: true, script: None, prg: None, validated: false }
     };
     ($code:literal, $ru:literal, $en:literal, $cat:ident, $bus:literal, $addr:literal, $from:literal, $to:literal) => {
         Module { code: $code, ru: $ru, en: $en, cat: Category::$cat, bus: $bus, addr: $addr,
-                 from: $from, to: $to, awd_only: false, prg: None, validated: false }
+                 from: $from, to: $to, awd_only: false, script: None, prg: None, validated: false }
     };
 }
 
@@ -175,11 +160,13 @@ fn engine_module(mark: &'static str, chassis: &str) -> Module {
         Module { code: mark, ru: "Двигатель · дизель", en: "Engine · diesel",
                  cat: Category::Pwr, bus: if ds2 { "DS2" } else { "D-CAN" }, addr: "0x12",
                  from: 0, to: 9999, awd_only: false,
+                 // The DDE4.0 diesel screen script; its .ipo yields SGBD DDE40KW0.
+                 script: if ds2 { Some("DDE40") } else { None },
                  prg: if ds2 { Some("DDE40KW0.prg") } else { None }, validated: ds2 }
     } else {
         Module { code: mark, ru: "Двигатель · бензин", en: "Engine · petrol",
                  cat: Category::Pwr, bus: "PT-CAN", addr: "0x12", from: 0, to: 9999,
-                 awd_only: false, prg: None, validated: false }
+                 awd_only: false, script: None, prg: None, validated: false }
     }
 }
 
@@ -188,7 +175,9 @@ fn catalog_module(e: &crate::catalog::CatEntry) -> Module {
     Module {
         code: e.code, ru: e.ru, en: e.en, cat: e.cat,
         bus: if e.validated { "DS2" } else { "—" }, addr: "—",
-        from: 0, to: 9999, awd_only: false, prg: e.prg, validated: e.validated,
+        // The CFGDAT catalog `code` IS the INPA script name (e.g. "DDE40", "ascdsc46") →
+        // its `SGDAT/<code>.ipo` is the screen source.
+        from: 0, to: 9999, awd_only: false, script: Some(e.code), prg: e.prg, validated: e.validated,
     }
 }
 
@@ -211,21 +200,3 @@ pub fn mods_for(ch: &Chassis) -> Vec<Module> {
     out
 }
 
-/// Stable hash of a module code (used for deterministic mock ident/faults).
-pub fn code_hash(code: &str) -> u32 {
-    let mut h: u32 = 0;
-    for ch in code.bytes() {
-        h = (h.wrapping_mul(31).wrapping_add(ch as u32)) % 99991;
-    }
-    h
-}
-
-/// Placeholder DTC count for the still-mock session content (fault pages, badges).
-/// NOT a real scan — only used inside screen 3 until per-ECU jobs are wired.
-pub fn mock_fault_count(code: &str) -> u32 {
-    let h = code_hash(code);
-    match h % 12 {
-        r if r < 3 => (h % 3) + 1,
-        _ => 0,
-    }
-}

@@ -1,12 +1,12 @@
 //! Fault-memory page (`FS_LESEN` / `FS_LOESCHEN`): the pre-`.ipo` INPA-style DTC view —
-//! expandable rows with status, cause, freeze-frame and raw record — now fully i18n'd via
-//! `tr()`. Read/Clear live in the F-zone (F1/F2); this only renders + toggles detail.
+//! expandable rows with status, cause, freeze-frame and raw record — chrome i18n'd via
+//! `t()`. Read/Clear live in the F-zone (F1/F2); this only renders + toggles detail.
 
 use egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2};
 
 use super::Act;
 use crate::app::App;
-use crate::i18n::tr;
+use crate::i18n::t;
 use crate::lang::Lang;
 use crate::theme::Colors;
 
@@ -17,32 +17,32 @@ pub(super) fn render(ui: &mut egui::Ui, c: &Colors, app: &App, act: &mut Option<
         *act = Some(Act::RunJob { job: "FS_LESEN".into(), arg: String::new() });
     }
     ui.label(
-        RichText::new(tr("F1 — Прочитать   ·   F2 — Удалить", lang)).size(11.0).color(c.fg_faint),
+        RichText::new(t("faults_fkeys", lang)).size(11.0).color(c.fg_faint),
     );
     ui.add_space(12.0);
 
     if app.faults_busy {
-        ui.label(RichText::new(tr("Чтение памяти ошибок…", lang)).size(12.0).color(c.accent));
+        ui.label(RichText::new(t("reading_faults", lang)).size(12.0).color(c.accent));
         return;
     }
     // A read error (e.g. transient timeout) — surface it instead of silence.
     if app.faults.is_none() && !app.status_msg.is_empty() {
-        ui.label(RichText::new(tr(&app.status_msg, lang)).size(12.0).color(c.err));
+        ui.label(RichText::new(app.status_msg.clone()).size(12.0).color(c.err));
         ui.add_space(6.0);
     }
     let Some(fr) = &app.faults else {
         ui.label(
-            RichText::new(tr("Нажмите F1 — читать память ошибок", lang)).size(12.0).color(c.fg_dim),
+            RichText::new(t("press_f1", lang)).size(12.0).color(c.fg_dim),
         );
         return;
     };
     let dtcs = parse_dtcs(fr);
     if dtcs.is_empty() {
-        ui.label(RichText::new(tr("Память ошибок пуста", lang)).size(13.0).strong().color(c.ok));
+        ui.label(RichText::new(t("faults_empty", lang)).size(13.0).strong().color(c.ok));
         return;
     }
     ui.label(
-        RichText::new(format!("{} {}", dtcs.len(), tr("ошибок в памяти", lang)))
+        RichText::new(format!("{} {}", dtcs.len(), t("faults_count", lang)))
             .size(11.0)
             .color(c.fg_faint),
     );
@@ -158,11 +158,11 @@ fn parse_dtcs(fr: &ediabas::JobResult) -> Vec<Dtc> {
 /// Three-state fault status (active / inactive / sporadic) → (label, colour).
 fn fault_status(c: &Colors, present: bool, sporadic: bool, lang: Lang) -> (String, Color32) {
     if sporadic {
-        (tr("спорадическая", lang), c.warn)
+        (t("sporadic", lang), c.warn)
     } else if present {
-        (tr("активна", lang), c.warn)
+        (t("active", lang), c.warn)
     } else {
-        (tr("неактивна", lang), c.fg_dim)
+        (t("inactive", lang), c.fg_dim)
     }
 }
 
@@ -249,18 +249,18 @@ fn real_fault_detail(ui: &mut egui::Ui, c: &Colors, d: &Dtc, lang: Lang) {
         .inner_margin(egui::Margin { left: 24.0, right: 8.0, top: 4.0, bottom: 10.0 })
         .show(ui, |ui| {
             let (status, scol) = fault_status(c, d.present, d.sporadic, lang);
-            ui.label(RichText::new(tr("СВЕДЕНИЯ", lang)).size(9.0).color(c.fg_faint));
+            ui.label(RichText::new(t("details", lang)).size(9.0).color(c.fg_faint));
             ui.add_space(2.0);
             kv_grid(ui, c, &[
-                kv(&tr("Статус", lang), status, "", scol),
-                kv(&tr("Код места", lang), format!("0x{}", d.code), "", c.fg),
-                kv(&tr("Повторений", lang), d.hfk.to_string(), "", c.fg),
-                kv(&tr("Счётчик (LZ)", lang), d.lz.to_string(), "", c.fg),
+                kv(&t("status", lang), status, "", scol),
+                kv(&t("location_code", lang), format!("0x{}", d.code), "", c.fg),
+                kv(&t("repetitions", lang), d.hfk.to_string(), "", c.fg),
+                kv(&t("counter_lz", lang), d.lz.to_string(), "", c.fg),
             ]);
 
             if !d.causes.is_empty() {
                 ui.add_space(8.0);
-                ui.label(RichText::new(tr("ПРИЧИНА", lang)).size(9.0).color(c.fg_faint));
+                ui.label(RichText::new(t("cause", lang)).size(9.0).color(c.fg_faint));
                 ui.add_space(2.0);
                 for cause in &d.causes {
                     ui.horizontal(|ui| {
@@ -274,7 +274,7 @@ fn real_fault_detail(ui: &mut egui::Ui, c: &Colors, d: &Dtc, lang: Lang) {
 
             if !d.uw.is_empty() {
                 ui.add_space(8.0);
-                ui.label(RichText::new(tr("СТОП-КАДР ПАРАМЕТРОВ", lang)).size(9.0).color(c.fg_faint));
+                ui.label(RichText::new(t("freeze_frame", lang)).size(9.0).color(c.fg_faint));
                 let satz = d.uw_satz.max(1) as usize;
                 let per = if satz > 1 && d.uw.len() % satz == 0 { d.uw.len() / satz } else { d.uw.len() };
                 let mut i = 0;
@@ -290,7 +290,7 @@ fn real_fault_detail(ui: &mut egui::Ui, c: &Colors, d: &Dtc, lang: Lang) {
                         } else {
                             ui.add_space(3.0);
                         }
-                        ui.label(RichText::new(format!("{} {}", tr("Снимок", lang), snap)).size(9.0).color(c.accent));
+                        ui.label(RichText::new(format!("{} {}", t("snapshot", lang), snap)).size(9.0).color(c.accent));
                     }
                     let end = (i + per).min(d.uw.len());
                     let cells: Vec<KvCell> =
@@ -302,7 +302,7 @@ fn real_fault_detail(ui: &mut egui::Ui, c: &Colors, d: &Dtc, lang: Lang) {
 
             if !d.raw.is_empty() {
                 ui.add_space(8.0);
-                ui.label(RichText::new(tr("СЫРАЯ ЗАПИСЬ", lang)).size(9.0).color(c.fg_faint));
+                ui.label(RichText::new(t("raw_record", lang)).size(9.0).color(c.fg_faint));
                 ui.label(RichText::new(&d.raw).size(10.0).monospace().color(c.fg_dim));
             }
         });

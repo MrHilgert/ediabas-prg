@@ -20,3 +20,17 @@ pub trait Driver: Send {
     /// Discard any bytes already sitting in the adapter's RX FIFO.
     fn flush_rx(&mut self);
 }
+
+/// Enumerate serial ports visible on this machine, sorted by name.
+///
+/// Cross-platform via `serialport`: Windows yields `COM1..COMn`, Linux yields
+/// `/dev/ttyUSB*`, `/dev/ttyACM*`, `/dev/ttyS*`. Enumeration errors are swallowed
+/// (best-effort) and reported as an empty list so the UI can degrade gracefully.
+pub fn available_ports() -> Vec<String> {
+    let mut names: Vec<String> = serialport::available_ports()
+        .map(|ports| ports.into_iter().map(|p| p.port_name).collect())
+        .unwrap_or_default();
+    names.sort();
+    names.dedup();
+    names
+}

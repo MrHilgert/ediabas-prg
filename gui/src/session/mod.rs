@@ -17,7 +17,7 @@ use inpa::model::{NavTarget, Row, ScreenKind, ScreenModule};
 
 use crate::app::{App, Screen};
 use crate::ecu::{mods_for, Module};
-use crate::i18n::tr;
+use crate::i18n::{t, tr_prg};
 use crate::screens::header;
 use crate::theme::palette;
 use crate::worker::{Cmd, Event, Worker};
@@ -46,7 +46,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         header(app, ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.centered_and_justified(|ui| {
-                ui.label(RichText::new(tr("Выберите блок", app.lang)).color(c.fg_faint));
+                ui.label(RichText::new(t("pick_module", app.lang)).color(c.fg_faint));
             });
         });
         return;
@@ -59,8 +59,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         header(app, ctx);
         egui::CentralPanel::default().frame(egui::Frame::none().fill(c.bg)).show(ctx, |ui| {
             ui.centered_and_justified(|ui| {
-                let msg = format!("Нет .ipo для {} — экраны недоступны", m.code);
-                ui.label(RichText::new(tr(&msg, app.lang)).color(c.fg_faint));
+                let msg = t("no_ipo", app.lang).replace("{code}", m.code);
+                ui.label(RichText::new(msg).color(c.fg_faint));
             });
         });
         return;
@@ -180,7 +180,7 @@ fn render_menu(
 ) {
     // Menu title is shown once, in the header (context_strip) — not repeated here.
     for it in items {
-        let label = tr(&it.label, app.lang);
+        let label = tr_prg(&it.label, app.lang);
         if widgets::menu_row(ui, c, it.fkey as usize, &label, &it.target) {
             *act = item_action(sm, app, view, it);
         }
@@ -210,7 +210,8 @@ fn render_screen(
         ScreenKind::Faults => faults::render(ui, c, app, act, app.lang),
         _ => {
             let n = screen.rows.len();
-            ui.label(RichText::new(tr(&format!("Экран: {} строк(и)", n), app.lang)).color(c.fg_dim));
+            let msg = t("screen_rows", app.lang).replace("{n}", &n.to_string());
+            ui.label(RichText::new(msg).color(c.fg_dim));
         }
     }
 }
@@ -374,8 +375,10 @@ fn lifecycle(app: &mut App, m: &Module, sm: &ScreenModule, ctx: &egui::Context) 
     let connectable = m.prg.is_some() && !sm.sgbd.is_empty();
     if connectable && app.connected != Some(m.code) && !app.connect_attempted {
         let prg = format!("{}.prg", sm.sgbd); // the PRG comes from the .ipo
+        // Port from settings (or first available if set to auto); fall back to COM3.
+        let port = app.active_port().unwrap_or_else(|| "COM3".into());
         let w = app.worker.get_or_insert_with(|| Worker::spawn(ctx.clone()));
-        w.send(Cmd::Connect { port: "COM3".into(), baud: 9600, prg });
+        w.send(Cmd::Connect { port, baud: 9600, prg });
         app.connect_attempted = true;
         app.connect_pending = true;
     }

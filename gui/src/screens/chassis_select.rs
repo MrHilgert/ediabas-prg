@@ -7,7 +7,7 @@ use egui::{Align2, Color32, FontId, Pos2, RichText, Rounding, Sense, Stroke, Vec
 use super::header;
 use crate::app::App;
 use crate::data::{self, DATA, SERIES};
-use crate::lang::dict;
+use crate::i18n::t;
 use crate::theme::palette;
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
@@ -18,7 +18,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 
 fn series_rail(app: &mut App, ctx: &egui::Context) {
     let c = palette(app.theme);
-    let d = dict(app.lang);
     let searching = !app.query.trim().is_empty();
     let frame = egui::Frame::none().fill(c.panel);
 
@@ -30,7 +29,7 @@ fn series_rail(app: &mut App, ctx: &egui::Context) {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                ui.label(RichText::new(d.series).size(10.0).strong().color(c.fg_dim));
+                ui.label(RichText::new(t("series", app.lang)).size(10.0).strong().color(c.fg_dim));
             });
             ui.add_space(9.0);
             ui.separator();
@@ -95,7 +94,6 @@ fn series_row(
 
 fn chassis_grid(app: &mut App, ctx: &egui::Context) {
     let c = palette(app.theme);
-    let d = dict(app.lang);
     let frame = egui::Frame::none().fill(c.bg);
 
     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
@@ -103,15 +101,15 @@ fn chassis_grid(app: &mut App, ctx: &egui::Context) {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.add_space(14.0);
-            ui.label(RichText::new(d.select_chassis).size(12.0).strong().color(c.fg));
-            ui.label(RichText::new(format!("/ {}", d.e_series)).size(11.0).color(c.fg_faint));
+            ui.label(RichText::new(t("select_chassis", app.lang)).size(12.0).strong().color(c.fg));
+            ui.label(RichText::new(format!("/ {}", t("e_series", app.lang))).size(11.0).color(c.fg_faint));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(14.0);
                 let n = filtered(app).len();
-                ui.label(RichText::new(format!("{n} · {}", d.results)).size(10.0).color(c.fg_faint));
+                ui.label(RichText::new(format!("{n} · {}", t("results", app.lang))).size(10.0).color(c.fg_faint));
                 ui.add_space(10.0);
-                ui.label(RichText::new(d.open_hint).size(10.0).color(c.fg_faint));
+                ui.label(RichText::new(t("open_hint", app.lang)).size(10.0).color(c.fg_faint));
                 ui.add_space(12.0);
                 egui::Frame::none()
                     .fill(c.panel2)
@@ -125,7 +123,7 @@ fn chassis_grid(app: &mut App, ctx: &egui::Context) {
                             egui::TextEdit::singleline(&mut app.query)
                                 .desired_width(190.0)
                                 .frame(false)
-                                .hint_text(RichText::new(d.search_ph).color(c.fg_faint)),
+                                .hint_text(RichText::new(t("search_ph", app.lang)).color(c.fg_faint)),
                         );
                     });
             });

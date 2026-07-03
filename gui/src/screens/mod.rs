@@ -6,7 +6,8 @@ pub mod ecu_select;
 use egui::{Color32, RichText, Sense, Stroke, Vec2};
 
 use crate::app::App;
-use crate::lang::{dict, Lang};
+use crate::i18n::t;
+use crate::lang::Lang;
 use crate::theme::{palette, Colors, Theme};
 
 /// A filled status dot of diameter `d`.
@@ -78,39 +79,6 @@ fn link_dot(app: &mut App, ctx: &egui::Context, c: &Colors, link: Link) -> Color
     }
 }
 
-/// A two-option segmented toggle (RU/EN, Dark/Light). Returns true if `left` picked.
-fn seg2(
-    ui: &mut egui::Ui,
-    c: &Colors,
-    left: &str,
-    right: &str,
-    left_active: bool,
-) -> Option<bool> {
-    let mut picked = None;
-    egui::Frame::none()
-        .stroke(Stroke::new(1.0, c.stroke))
-        .rounding(3.0)
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            for (label, active, is_left) in
-                [(left, left_active, true), (right, !left_active, false)]
-            {
-                let txt = RichText::new(label)
-                    .size(11.0)
-                    .color(if active { c.accent } else { c.fg_dim })
-                    .strong();
-                let btn = egui::Button::new(txt)
-                    .fill(if active { c.panel2 } else { Color32::TRANSPARENT })
-                    .stroke(Stroke::NONE)
-                    .rounding(3.0);
-                if ui.add(btn).clicked() {
-                    picked = Some(is_left);
-                }
-            }
-        });
-    picked
-}
-
 /// A single icon toggle for the theme, painted with shapes so it needs no icon font
 /// (native-safe): a moon while Dark is active, a sun while Light is. Click flips the theme.
 fn theme_toggle(ui: &mut egui::Ui, c: &Colors, theme: Theme) -> Option<Theme> {
@@ -140,10 +108,29 @@ fn theme_toggle(ui: &mut egui::Ui, c: &Colors, theme: Theme) -> Option<Theme> {
     resp.clicked().then(|| if theme == Theme::Dark { Theme::Light } else { Theme::Dark })
 }
 
-/// Top header: wordmark, interface chip, RU/EN + theme toggles. Shared by screens.
+/// A settings button, painted as an "adjustments" icon (three sliders with knobs) so
+/// it needs no icon font. Returns true when clicked.
+fn gear_button(ui: &mut egui::Ui, c: &Colors) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(38.0, 32.0), Sense::click());
+    let hovered = resp.hovered();
+    let bg = if hovered { c.panel2 } else { c.panel };
+    let p = ui.painter_at(rect);
+    p.rect(rect.shrink(0.5), egui::Rounding::same(4.0), bg, Stroke::new(1.0, c.stroke));
+    let col = if hovered { c.accent } else { c.fg_dim };
+    let cx = rect.center().x;
+    let (x0, x1) = (cx - 8.0, cx + 8.0);
+    // Three horizontal rails, each with a knob at a different position.
+    for (i, knob_x) in [cx + 3.0, cx - 4.0, cx + 5.0].into_iter().enumerate() {
+        let y = rect.center().y + (i as f32 - 1.0) * 7.0;
+        p.line_segment([egui::pos2(x0, y), egui::pos2(x1, y)], Stroke::new(1.6, col));
+        p.circle_filled(egui::pos2(knob_x, y), 2.6, col);
+    }
+    resp.clicked()
+}
+
+/// Top header: wordmark, interface chip, settings + theme toggles. Shared by screens.
 pub fn header(app: &mut App, ctx: &egui::Context) {
     let c = palette(app.theme);
-    let d = dict(app.lang);
     let frame = egui::Frame::none()
         .fill(c.panel)
         .inner_margin(egui::Margin::symmetric(14.0, 8.0));
@@ -157,14 +144,14 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
 
                 // Right cluster
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Settings — gear opens the popup (language, theme, COM port).
+                    if gear_button(ui, &c) {
+                        app.open_settings();
+                    }
+                    ui.add_space(8.0);
                     // Theme toggle — painted sun/moon (no icon font needed on native).
                     if let Some(t) = theme_toggle(ui, &c, app.theme) {
                         app.theme = t;
-                    }
-                    ui.add_space(8.0);
-                    // Language toggle
-                    if let Some(left) = seg2(ui, &c, "RU", "EN", app.lang == Lang::Ru) {
-                        app.lang = if left { Lang::Ru } else { Lang::En };
                     }
                     ui.add_space(12.0);
                     // Interface chip — the single source of truth for link state: it winks
@@ -182,12 +169,189 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                             ui.horizontal_centered(|ui| {
                                 dot(ui, dot_col, 8.0);
                                 ui.add_space(6.0);
-                                ui.label(RichText::new(d.interface).size(10.0).color(c.fg_dim));
-                                ui.label(RichText::new("· D-CAN").size(10.0).color(c.fg));
+                                ui.label(
+                                    RichText::new(t("interface", app.lang)).size(10.0).color(c.fg_dim),
+                                );
+                                ui.label(RichText::new("D-CAN").size(10.0).color(c.fg));
                             });
                         });
                 });
             });
+        });
+}
+
+/// A dimmed field label in the settings grid's left column, right-aligned so the
+/// dropdowns line up in the right column.
+fn field_label(ui: &mut egui::Ui, c: &Colors, text: &str) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(RichText::new(text).size(12.0).color(c.fg_dim));
+    });
+}
+
+/// A flat text button whose fill and text clearly react to hover and press (accent
+/// on press). Painted so the click feedback is unmistakable, unlike a fixed-fill
+/// `egui::Button`. Returns true when clicked.
+fn flat_button(ui: &mut egui::Ui, c: &Colors, label: &str) -> bool {
+    let font = egui::FontId::proportional(11.0);
+    let measure = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), c.fg);
+    let size = measure.size() + Vec2::new(24.0, 14.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let (bg, fg) = if resp.is_pointer_button_down_on() {
+        (c.accent, c.accent_fg)
+    } else if resp.hovered() {
+        (c.panel2, c.accent)
+    } else {
+        (c.panel, c.fg_dim)
+    };
+    let p = ui.painter_at(rect);
+    p.rect(rect, egui::Rounding::same(3.0), bg, Stroke::new(1.0, c.stroke));
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, fg);
+    p.galley(rect.center() - galley.size() * 0.5, galley, fg);
+    resp.clicked()
+}
+
+/// A small ✕ close button for the top-right corner of a popup. Highlights on hover
+/// and press. Returns true when clicked.
+fn close_cross(ui: &mut egui::Ui, c: &Colors) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+    let (bg, col) = if resp.is_pointer_button_down_on() {
+        (c.accent, c.accent_fg)
+    } else if resp.hovered() {
+        (c.panel2, c.fg)
+    } else {
+        (Color32::TRANSPARENT, c.fg_dim)
+    };
+    let p = ui.painter_at(rect);
+    p.rect(rect, egui::Rounding::same(4.0), bg, Stroke::NONE);
+    let ctr = rect.center();
+    let r = 5.0;
+    p.line_segment([ctr + Vec2::new(-r, -r), ctr + Vec2::new(r, r)], Stroke::new(1.6, col));
+    p.line_segment([ctr + Vec2::new(-r, r), ctr + Vec2::new(r, -r)], Stroke::new(1.6, col));
+    resp.clicked()
+}
+
+/// Settings popup: language, theme, and COM-port selection — three aligned
+/// dropdowns. Rendered above every screen from `App::update`. Dims and blocks the
+/// screen behind it; the backdrop or the top-right ✕ dismisses it. Persistence
+/// happens in `App::update` (save-on-change): this only mutates lang/theme/port.
+pub fn settings_modal(app: &mut App, ctx: &egui::Context) {
+    if !app.show_settings {
+        return;
+    }
+    let c = palette(app.theme);
+    let lang = app.lang;
+    let screen = ctx.screen_rect();
+    const COMBO_W: f32 = 190.0;
+
+    // Dim backdrop; a click outside the window closes settings.
+    let backdrop = egui::Area::new(egui::Id::new("settings_backdrop"))
+        .order(egui::Order::Middle)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
+            ui.painter().rect_filled(rect, 0.0, Color32::from_black_alpha(170));
+            resp
+        });
+    if backdrop.inner.clicked() {
+        app.show_settings = false;
+    }
+
+    let frame = egui::Frame::none()
+        .fill(c.panel)
+        .stroke(Stroke::new(1.0, c.stroke2))
+        .rounding(6.0)
+        .inner_margin(egui::Margin::symmetric(28.0, 24.0));
+
+    egui::Window::new("settings_modal")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.set_width(380.0);
+
+            // Title row: heading left, ✕ close top-right.
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t("settings", lang)).size(15.0).strong().color(c.fg));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if close_cross(ui, &c) {
+                        app.show_settings = false;
+                    }
+                });
+            });
+            ui.add_space(20.0);
+
+            let auto = t("auto", lang);
+            egui::Grid::new("settings_grid")
+                .num_columns(2)
+                .spacing([16.0, 16.0])
+                .show(ui, |ui| {
+                    // Language — shown with its own endonym (never translated).
+                    field_label(ui, &c, &t("language", lang));
+                    let lang_txt = match app.lang {
+                        Lang::Ru => "Русский",
+                        Lang::En => "English",
+                    };
+                    egui::ComboBox::from_id_salt("set_lang")
+                        .selected_text(RichText::new(lang_txt).size(12.0).color(c.fg))
+                        .width(COMBO_W)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut app.lang, Lang::Ru, "Русский");
+                            ui.selectable_value(&mut app.lang, Lang::En, "English");
+                        });
+                    ui.end_row();
+
+                    // Theme.
+                    field_label(ui, &c, &t("theme", lang));
+                    let theme_txt = if app.theme == Theme::Dark {
+                        t("theme_dark", lang)
+                    } else {
+                        t("theme_light", lang)
+                    };
+                    egui::ComboBox::from_id_salt("set_theme")
+                        .selected_text(RichText::new(theme_txt).size(12.0).color(c.fg))
+                        .width(COMBO_W)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut app.theme, Theme::Dark, t("theme_dark", lang));
+                            ui.selectable_value(&mut app.theme, Theme::Light, t("theme_light", lang));
+                        });
+                    ui.end_row();
+
+                    // COM port — cross-platform list (Windows COMx / Linux /dev/tty*).
+                    field_label(ui, &c, &t("com_port", lang));
+                    ui.horizontal(|ui| {
+                        let selected = app.port.clone().unwrap_or_else(|| auto.clone());
+                        egui::ComboBox::from_id_salt("set_port")
+                            .selected_text(RichText::new(selected).size(12.0).color(c.fg))
+                            .width(COMBO_W)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut app.port, None, auto.as_str());
+                                for p in app.ports.clone() {
+                                    ui.selectable_value(&mut app.port, Some(p.clone()), p.as_str());
+                                }
+                            });
+                        ui.add_space(8.0);
+                        if flat_button(ui, &c, &t("refresh", lang)) {
+                            app.refresh_ports();
+                        }
+                    });
+                    ui.end_row();
+                });
+
+            // Hint: what "auto" resolves to, or that no ports are present.
+            ui.add_space(8.0);
+            let hint = if app.ports.is_empty() {
+                t("no_ports", lang)
+            } else if app.port.is_none() {
+                format!("{} → {}", auto, app.ports.first().cloned().unwrap_or_default())
+            } else {
+                String::new()
+            };
+            if !hint.is_empty() {
+                ui.label(RichText::new(hint).size(10.0).color(c.fg_faint));
+            }
         });
 }
 

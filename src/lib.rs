@@ -37,6 +37,7 @@ pub mod vm;
 mod trace;
 
 pub use api::{JobResult, ResultSet, Session};
+pub use driver::available_ports;
 pub use error::{Error, Result};
 pub use prg::{Measurement, PrgFile};
 pub use vm::Value;

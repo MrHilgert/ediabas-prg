@@ -6,7 +6,8 @@ use egui::{Align2, Color32, FontId, Pos2, RichText, Rounding, Sense, Stroke, Vec
 use super::header;
 use crate::app::{App, Screen};
 use crate::ecu::{mods_for, Category, Module};
-use crate::lang::{dict, Lang};
+use crate::i18n::t;
+use crate::lang::Lang;
 use crate::theme::{palette, Colors};
 use crate::worker::Event;
 
@@ -56,24 +57,23 @@ fn poll_connect(app: &mut App, ctx: &egui::Context) {
 /// Turn a raw worker/transport error into a short, user-facing reason. The
 /// technical string (VM/IO detail) stays in the trace; the popup shows only this.
 fn humanize_connect_error(raw: &str, lang: Lang) -> String {
-    let d = dict(lang);
     let low = raw.to_ascii_lowercase();
-    let msg = if low.contains("timed out") || low.contains("timeout")
+    let key = if low.contains("timed out") || low.contains("timeout")
         || low.contains("no response") || low.contains("не отвеч")
     {
-        d.err_no_response
+        "err_no_response"
     } else if low.contains("denied") || low.contains("отказано")
         || low.contains("in use") || low.contains("занят")
     {
-        d.err_port_busy
+        "err_port_busy"
     } else if low.contains("not found") || low.contains("cannot find")
         || low.contains("no such") || low.contains("не найд")
     {
-        d.err_no_adapter
+        "err_no_adapter"
     } else {
-        d.err_generic
+        "err_generic"
     };
-    msg.to_string()
+    t(key, lang)
 }
 
 fn mods(app: &App) -> Vec<Module> {
@@ -85,7 +85,6 @@ fn mods(app: &App) -> Vec<Module> {
 
 fn category_rail(app: &mut App, ctx: &egui::Context) {
     let c = palette(app.theme);
-    let d = dict(app.lang);
     let all = mods(app);
     let frame = egui::Frame::none().fill(c.panel);
 
@@ -97,7 +96,7 @@ fn category_rail(app: &mut App, ctx: &egui::Context) {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                ui.label(RichText::new(d.category).size(10.0).strong().color(c.fg_dim));
+                ui.label(RichText::new(t("category", app.lang)).size(10.0).strong().color(c.fg_dim));
             });
             ui.add_space(9.0);
             ui.separator();
@@ -143,7 +142,6 @@ fn category_rail(app: &mut App, ctx: &egui::Context) {
 
 fn module_table(app: &mut App, ctx: &egui::Context) {
     let c = palette(app.theme);
-    let d = dict(app.lang);
     let all = mods(app);
     let chassis_code = app.selected_chassis().map(|ch| ch.code).unwrap_or("");
     let visible: Vec<&Module> = all
@@ -160,7 +158,7 @@ fn module_table(app: &mut App, ctx: &egui::Context) {
             ui.add_space(14.0);
             if ui
                 .add(
-                    egui::Button::new(RichText::new(format!("‹ {}", d.back)).size(11.0).color(c.fg_dim))
+                    egui::Button::new(RichText::new(format!("‹ {}", t("back_chassis", app.lang))).size(11.0).color(c.fg_dim))
                         .fill(Color32::TRANSPARENT)
                         .stroke(Stroke::new(1.0, c.stroke)),
                 )
@@ -169,7 +167,7 @@ fn module_table(app: &mut App, ctx: &egui::Context) {
                 app.screen = Screen::Chassis;
             }
             ui.add_space(10.0);
-            ui.label(RichText::new(d.select_ecu).size(12.0).strong().color(c.fg));
+            ui.label(RichText::new(t("select_ecu", app.lang)).size(12.0).strong().color(c.fg));
             ui.label(RichText::new(format!("/ {chassis_code}")).size(11.0).color(c.fg_faint));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -181,7 +179,7 @@ fn module_table(app: &mut App, ctx: &egui::Context) {
                     .and_then(|code| all.iter().find(|m| m.code == code))
                     .map_or(false, |m| m.connectable());
                 let btn = egui::Button::new(
-                    RichText::new(format!("▸ {}", d.connect)).size(11.0).strong().color(c.accent_fg),
+                    RichText::new(format!("▸ {}", t("connect", app.lang))).size(11.0).strong().color(c.accent_fg),
                 )
                 .fill(c.accent)
                 .rounding(3.0)
@@ -263,7 +261,7 @@ fn connect_modal(app: &mut App, ctx: &egui::Context) {
         return;
     }
     let c = palette(app.theme);
-    let d = dict(app.lang);
+    let lang = app.lang;
     let screen = ctx.screen_rect();
 
     // Dim backdrop (above panels), also swallowing any click to the screen behind.
@@ -296,7 +294,7 @@ fn connect_modal(app: &mut App, ctx: &egui::Context) {
                     None => {
                         ui.add(egui::Spinner::new().size(30.0).color(c.accent));
                         ui.add_space(16.0);
-                        ui.label(RichText::new(d.connecting).size(13.0).strong().color(c.fg));
+                        ui.label(RichText::new(t("connecting", lang)).size(13.0).strong().color(c.fg));
                         ui.add_space(6.0);
                         ui.label(
                             RichText::new(format!("{code} · INITIALISIERUNG"))
@@ -307,13 +305,13 @@ fn connect_modal(app: &mut App, ctx: &egui::Context) {
                     Some(msg) => {
                         ui.label(RichText::new("⚠").size(30.0).color(c.err));
                         ui.add_space(12.0);
-                        ui.label(RichText::new(d.connect_failed).size(13.0).strong().color(c.err));
+                        ui.label(RichText::new(t("connect_failed", lang)).size(13.0).strong().color(c.err));
                         ui.add_space(8.0);
                         ui.label(RichText::new(msg).size(10.0).color(c.fg_dim));
                         ui.add_space(20.0);
                         ui.horizontal(|ui| {
                             let retry = egui::Button::new(
-                                RichText::new(d.retry).size(11.0).strong().color(c.accent_fg),
+                                RichText::new(t("retry", lang)).size(11.0).strong().color(c.accent_fg),
                             )
                             .fill(c.accent)
                             .rounding(3.0)
@@ -323,7 +321,7 @@ fn connect_modal(app: &mut App, ctx: &egui::Context) {
                             }
                             ui.add_space(10.0);
                             let close = egui::Button::new(
-                                RichText::new(d.close).size(11.0).color(c.fg_dim),
+                                RichText::new(t("close", lang)).size(11.0).color(c.fg_dim),
                             )
                             .fill(c.panel2)
                             .stroke(Stroke::new(1.0, c.stroke))

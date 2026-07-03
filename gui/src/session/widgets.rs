@@ -7,7 +7,7 @@ use inpa::model::{NavItem, NavTarget, Row, ScreenModule};
 use super::{item_action, row_value, Act, View};
 use crate::app::{App, Screen};
 use crate::ecu::Module;
-use crate::i18n::tr;
+use crate::i18n::{t, tr_prg};
 use crate::lang::Lang;
 use crate::theme::Colors;
 
@@ -39,7 +39,7 @@ pub(super) fn fkey_panel(
                 match item.filter(|it| !it.label.trim().is_empty()) {
                     Some(it) => match item_action(sm, app, view, it) {
                         Some(a) => {
-                            if fkey_button(col, c, f, &tr(&it.label, lang), &it.target) {
+                            if fkey_button(col, c, f, &tr_prg(&it.label, lang), &it.target) {
                                 *act = Some(a);
                             }
                         }
@@ -107,7 +107,7 @@ pub(super) fn context_strip(
         ui.add_space(14.0);
         if ui
             .add(
-                egui::Button::new(RichText::new(format!("‹ {}", tr("Выбор ЭБУ", lang))).size(11.0).color(c.fg_dim))
+                egui::Button::new(RichText::new(format!("‹ {}", t("ecu_selection", lang))).size(11.0).color(c.fg_dim))
                     .fill(Color32::TRANSPARENT)
                     .stroke(Stroke::new(1.0, c.stroke)),
             )
@@ -122,7 +122,7 @@ pub(super) fn context_strip(
             .map(|s| s.title.clone())
             .or_else(|| sm.as_menu(view.menu).map(|mn| mn.title.clone()))
             .unwrap_or_default();
-        ui.label(RichText::new(tr(&title, lang)).size(13.0).strong().color(c.fg));
+        ui.label(RichText::new(tr_prg(&title, lang)).size(13.0).strong().color(c.fg));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(14.0);
@@ -229,7 +229,7 @@ pub(super) fn stream(
 }
 
 fn cell_of(row: &Row, live: Option<&ediabas::JobResult>, lang: Lang) -> Option<Cell> {
-    let label = tr(row.label(), lang);
+    let label = tr_prg(row.label(), lang);
     match row {
         // Logical: On/Off state, NOT a bar.
         Row::Logical { on, off, .. } => {
@@ -357,21 +357,21 @@ pub(super) fn textinfo(
     });
     if !have_data {
         if app.info_busy {
-            ui.label(RichText::new(tr("Чтение данных…", lang)).size(12.0).color(c.accent));
+            ui.label(RichText::new(t("reading_data", lang)).size(12.0).color(c.accent));
         } else if !app.status_msg.is_empty() {
-            ui.label(RichText::new(tr(&app.status_msg, lang)).size(12.0).color(c.err));
+            ui.label(RichText::new(app.status_msg.clone()).size(12.0).color(c.err));
         } else if let Some(l) = live {
             // The job answered but none of our result names matched — surface what it
             // actually returned so a name mismatch is diagnosable at a glance.
             let names: Vec<&str> = l.sets().iter().flat_map(|s| s.names()).collect();
             if names.is_empty() {
-                ui.label(RichText::new(tr("Задание вернуло пустой ответ", lang)).size(12.0).color(c.warn));
+                ui.label(RichText::new(t("empty_response", lang)).size(12.0).color(c.warn));
             } else {
-                ui.label(RichText::new(tr("Нет искомых полей. Блок вернул:", lang)).size(12.0).color(c.warn));
+                ui.label(RichText::new(t("no_fields", lang)).size(12.0).color(c.warn));
                 ui.label(RichText::new(names.join(", ")).size(11.0).monospace().color(c.fg_dim));
             }
         } else if app.info_tries > 0 {
-            ui.label(RichText::new(tr("Нет данных от блока", lang)).size(12.0).color(c.warn));
+            ui.label(RichText::new(t("no_data", lang)).size(12.0).color(c.warn));
         }
         ui.add_space(6.0);
     }
@@ -392,7 +392,7 @@ pub(super) fn textinfo(
 /// One static info line: a bold heading, or a `label ……… value` field (runtime SGBD
 /// values we can't resolve statically show as a dash).
 fn info_row(ui: &mut egui::Ui, c: &Colors, line: &inpa::InfoLine, lang: Lang) {
-    let label = tr(&line.label, lang);
+    let label = tr_prg(&line.label, lang);
     if matches!(line.value, inpa::InfoValue::Heading) {
         ui.add_space(8.0);
         ui.label(RichText::new(label).size(13.0).strong().color(c.fg));
@@ -400,7 +400,7 @@ fn info_row(ui: &mut egui::Ui, c: &Colors, line: &inpa::InfoLine, lang: Lang) {
         return;
     }
     let value = match &line.value {
-        inpa::InfoValue::Const(v) => tr(v, lang),
+        inpa::InfoValue::Const(v) => tr_prg(v, lang),
         _ => "—".to_string(),
     };
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
@@ -413,7 +413,7 @@ fn info_row(ui: &mut egui::Ui, c: &Colors, line: &inpa::InfoLine, lang: Lang) {
 /// One `label ……… value` line with an underline.
 fn kv_line(ui: &mut egui::Ui, c: &Colors, row: &Row, live: Option<&ediabas::JobResult>, lang: Lang) {
     let Row::Text { result, .. } = row else { return };
-    let label = tr(row.label(), lang);
+    let label = tr_prg(row.label(), lang);
     let value = live.and_then(|l| l.get_str(result)).unwrap_or_else(|| "—".into());
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::hover());
     let p = ui.painter_at(rect);
@@ -424,11 +424,11 @@ fn kv_line(ui: &mut egui::Ui, c: &Colors, row: &Row, live: Option<&ediabas::JobR
 
 /// Activation page: list the activation actions (label + job). Running is via the menu/F-keys.
 pub(super) fn activation(ui: &mut egui::Ui, c: &Colors, rows: &[Row], lang: Lang) {
-    ui.label(RichText::new(tr("Активации выполняются клавишами меню.", lang)).size(11.0).color(c.fg_faint));
+    ui.label(RichText::new(t("activations_hint", lang)).size(11.0).color(c.fg_faint));
     ui.add_space(6.0);
     for row in rows {
         let Row::Action { job, .. } = row else { continue };
-        let label = tr(row.label(), lang);
+        let label = tr_prg(row.label(), lang);
         ui.horizontal(|ui| {
             ui.label(RichText::new("▶").size(11.0).color(c.ok));
             ui.add_space(8.0);

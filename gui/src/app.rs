@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use crate::config::Settings;
 use crate::data::{self, DATA};
 use crate::ecu::Category;
 use crate::lang::Lang;
@@ -85,6 +86,12 @@ pub struct App {
     pub comms_at: f64,                     // ctx time of that last change (for the fade)
     pub comms_miss: u32,                   // consecutive streaming poll misses (transient)
 
+    // Settings (persisted to settings.ini)
+    pub show_settings: bool,           // settings popup open
+    pub port: Option<String>,          // chosen serial port (None = auto)
+    pub ports: Vec<String>,            // last-enumerated available ports (for the picker)
+    saved: Settings,                   // last-persisted snapshot (save-on-change)
+
     // Window
     pub fullscreen: bool,
     startup_frames: u8,
@@ -92,7 +99,9 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let theme = Theme::Dark;
+        // Restore persisted language/theme/port (or defaults on first run).
+        let settings = Settings::load();
+        let theme = settings.theme;
         install_fonts(&cc.egui_ctx);
         // Nudge everything up ~6% — a touch larger and easier to read, keeping
         // all the hand-tuned pixel layouts in proportion (scales on top of DPI).
@@ -104,7 +113,7 @@ impl App {
 
         Self {
             theme,
-            lang: Lang::Ru,
+            lang: settings.lang,
             screen: Screen::Chassis,
             series: '3',
             chassis: e46,
@@ -136,8 +145,43 @@ impl App {
             comms_seen: 0,
             comms_at: 0.0,
             comms_miss: 0,
+            show_settings: false,
+            port: settings.port.clone(),
+            ports: Vec::new(),
+            saved: settings,
             fullscreen: true,
             startup_frames: 3,
+        }
+    }
+
+    /// Open the settings popup, refreshing the list of serial ports.
+    pub fn open_settings(&mut self) {
+        self.ports = ediabas::available_ports();
+        self.show_settings = true;
+    }
+
+    /// Re-enumerate serial ports (settings "Refresh" button).
+    pub fn refresh_ports(&mut self) {
+        self.ports = ediabas::available_ports();
+    }
+
+    /// The serial port CONNECT will actually use: the chosen one, or the first
+    /// available if set to auto. `None` only when auto and nothing is present.
+    pub fn active_port(&self) -> Option<String> {
+        self.port.clone().or_else(|| ediabas::available_ports().into_iter().next())
+    }
+
+    /// Current settings as reflected by live UI state.
+    fn current_settings(&self) -> Settings {
+        Settings { lang: self.lang, theme: self.theme, port: self.port.clone() }
+    }
+
+    /// Persist to `settings.ini` only when language/theme/port actually changed.
+    fn persist_if_changed(&mut self) {
+        let now = self.current_settings();
+        if now != self.saved {
+            now.save();
+            self.saved = now;
         }
     }
 
@@ -219,7 +263,7 @@ impl App {
             // Any ECU with a screen script (.ipo) can open the session — its structure
             // renders even without a transport; the link (if any) comes up in the session.
             Some(m) if m.script.is_some() || m.prg.is_some() => self.screen = Screen::Session,
-            _ => self.connect_error = Some(crate::lang::dict(self.lang).no_sgbd.to_string()),
+            _ => self.connect_error = Some(crate::i18n::t("no_sgbd", self.lang)),
         }
     }
 
@@ -265,6 +309,11 @@ impl eframe::App for App {
             Screen::Ecu => screens::ecu_select::show(self, ctx),
             Screen::Session => crate::session::show(self, ctx),
         }
+
+        // Settings popup renders above any screen; persist any change it (or the
+        // header toggles) made this frame.
+        screens::settings_modal(self, ctx);
+        self.persist_if_changed();
     }
 }
 

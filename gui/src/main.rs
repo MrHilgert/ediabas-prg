@@ -10,6 +10,7 @@
 
 mod app;
 mod catalog;
+mod config;
 mod data;
 mod ecu;
 mod i18n;

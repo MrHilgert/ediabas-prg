@@ -613,9 +613,13 @@ impl Vm {
                     let pos = ip + 2;
                     if (1..=4).contains(&hi) && pos < code.len() {
                         let r = code[pos];
-                        let v = self.regs.get(&r).map(Value::as_long).unwrap_or(0);
+                        // Honour the B/I→L register overlap on BOTH read and write: a byte
+                        // reg holds a byte of an L reg, not its own slot. Reading the raw
+                        // map entry (and writing a full Long) corrupted the overlapped L
+                        // register; `write_num_reg` masks the result back to `r`'s width.
+                        let v = reg_val_from_map(&self.regs, r);
                         let result = !v;
-                        self.regs.insert(r, Value::Long(result));
+                        self.write_num_reg(hi, r, result as i64);
                         self.flags.zero = result == 0; self.flags.minus = result < 0;
                         ip = pos + 1;
                     } else {
@@ -1054,7 +1058,11 @@ impl Vm {
                     let mut pos = ip + 2;
                     if (1..=4).contains(&hi) && pos < code.len() { pos += 1; }
                     let (s, p2) = read_str_at(&self.regs, lo, code, pos);
-                    self.regs.insert(REG_L0, Value::Long(s.len() as i32));
+                    // Length in CHARACTERS, not UTF-8 bytes: our strings are Latin-1
+                    // (one char per source byte), so a byte ≥0x80 (umlaut) encodes as two
+                    // UTF-8 bytes and `s.len()` would over-count. `chars().count()` gives
+                    // the true byte length EDIABAS means. ASCII is unaffected.
+                    self.regs.insert(REG_L0, Value::Long(s.chars().count() as i32));
                     ip = p2;
                 }
 
@@ -1100,7 +1108,8 @@ impl Vm {
                     let mut pos = ip + 2;
                     if (1..=4).contains(&hi) && pos < code.len() { pos += 1; }
                     let (s, p2) = read_str_at(&self.regs, lo, code, pos);
-                    self.regs.insert(REG_L0, Value::Long(s.len() as i32));
+                    // Character count (Latin-1), not UTF-8 byte length — see `strlen`.
+                    self.regs.insert(REG_L0, Value::Long(s.chars().count() as i32));
                     ip = p2;
                 }
 

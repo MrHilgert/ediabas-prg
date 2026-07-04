@@ -32,9 +32,18 @@ fn tables() -> &'static Tables {
     T.get_or_init(|| Tables {
         ui_ru: load_ini("locale/ui.ru.ini"),
         ui_en: load_ini("locale/ui.en.ini"),
-        prg_ru: load_ini("locale/prg.ru.ini"),
-        prg_en: load_ini("locale/prg.en.ini"),
+        // ECU/`.prg` strings: the bulk comes from the translated `de-<lang>.tsv`
+        // (German source → translation, tab-separated). A small hand-curated
+        // `prg.<lang>.ini` is overlaid on top so manual fixes win over the batch.
+        prg_ru: merge(load_tsv("locale/de-ru.tsv"), load_ini("locale/prg.ru.ini")),
+        prg_en: merge(load_tsv("locale/de-en.tsv"), load_ini("locale/prg.en.ini")),
     })
+}
+
+/// Overlay `over` onto `base` (later keys win), returning the merged map.
+fn merge(mut base: HashMap<String, String>, over: HashMap<String, String>) -> HashMap<String, String> {
+    base.extend(over);
+    base
 }
 
 /// Translate a UI chrome string by its stable key. Falls back to the Russian base
@@ -61,6 +70,26 @@ pub fn tr_prg(german: &str, lang: Lang) -> String {
         Lang::En => &tb.prg_en,
     };
     table.get(german.trim()).cloned().unwrap_or_else(|| german.to_string())
+}
+
+/// Load a translation table from a tab-separated file (`german<TAB>translation`).
+/// This is how the bulk ECU-string translations ship (`de-ru.tsv`, `de-en.tsv`):
+/// tabs, not `=`, so German text containing `=`/`;`/`[` is preserved verbatim.
+/// Absent file → empty map (passthrough). Keys are trimmed to match `tr_prg`'s
+/// trimmed lookup; blank lines and lines without a tab are skipped.
+fn load_tsv(rel: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Some(path) = resolve(rel) else { return map };
+    let Ok(text) = std::fs::read_to_string(path) else { return map };
+    for line in text.lines() {
+        if let Some((k, v)) = line.split_once('\t') {
+            let k = k.trim();
+            if !k.is_empty() {
+                map.insert(k.to_string(), v.trim().to_string());
+            }
+        }
+    }
+    map
 }
 
 /// Load an `.ini` table (`key = value`). Absent file → empty map (passthrough).

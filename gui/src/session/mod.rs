@@ -73,7 +73,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     // renders. While the handshake is in flight → loading modal only. If it finished
     // WITHOUT a link → don't open a dead session: bounce back to ECU-select and show
     // the reason there. ECUs without a transport (structure-only) skip the gate.
-    let connectable = m.prg.is_some() && !sm.sgbd.is_empty();
+    // Connectability follows the .ipo's own SGBD (what the connect actually opens),
+    // NOT the catalog `m.prg` mapping — so every ECU whose .ipo names an SGBD gets a
+    // real connect attempt (and its loading modal), and only a missing SGBD stays
+    // structure-only. `m` (bus/addr) is still used elsewhere.
+    let connectable = !sm.sgbd.is_empty();
     if connectable && app.connected != Some(m.code) {
         header(app, ctx);
         egui::CentralPanel::default()
@@ -446,7 +450,11 @@ fn drain_worker(app: &mut App) {
 /// Establish the transport link once, using the PRG the `.ipo` named. Only ECUs with a
 /// real SGBD on a built transport (DDE/DS2 today) connect; the rest render structure-only.
 fn lifecycle(app: &mut App, m: &Module, sm: &ScreenModule, ctx: &egui::Context) {
-    let connectable = m.prg.is_some() && !sm.sgbd.is_empty();
+    // Connectability follows the .ipo's own SGBD (what the connect actually opens),
+    // NOT the catalog `m.prg` mapping — so every ECU whose .ipo names an SGBD gets a
+    // real connect attempt (and its loading modal), and only a missing SGBD stays
+    // structure-only. `m` (bus/addr) is still used elsewhere.
+    let connectable = !sm.sgbd.is_empty();
     if connectable && app.connected != Some(m.code) && !app.connect_attempted {
         let prg = format!("{}.prg", sm.sgbd); // fallback SGBD from the .ipo
         // Port from settings (or first available if set to auto); fall back to COM3.

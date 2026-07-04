@@ -4,12 +4,13 @@
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use inpa::model::{NavItem, NavTarget, Row, ScreenModule};
 
-use super::{item_action, row_value, Act, View};
+use super::{item_action, Act, View};
 use crate::app::{App, Screen};
 use crate::ecu::Module;
 use crate::i18n::{t, tr_prg};
 use crate::lang::Lang;
-use crate::theme::Colors;
+use crate::model::MeasFrame;
+use crate::ui::theme::Colors;
 
 /// Bottom F-key bar: a fixed strip of exactly 10 slots (F1..F10), stretched evenly across
 /// the full width. Each slot holds the menu item with that F-key (INPA Exit is remapped to
@@ -172,12 +173,14 @@ enum Cell {
 }
 
 /// Group consecutive rows that share an `.ipo` LINE index (INPA drew them on one line).
-fn group_by_line(rows: &[Row]) -> Vec<&[Row]> {
-    let mut groups: Vec<&[Row]> = Vec::new();
+/// Returns `[start, end)` ranges so callers keep each row's GLOBAL index — the key into
+/// the decoded `MeasFrame` (values are positional by `screen.rows` index).
+fn group_ranges(rows: &[Row]) -> Vec<(usize, usize)> {
+    let mut groups = Vec::new();
     let mut start = 0;
     for i in 1..=rows.len() {
         if i == rows.len() || rows[i].line() != rows[start].line() {
-            groups.push(&rows[start..i]);
+            groups.push((start, i));
             start = i;
         }
     }
@@ -192,15 +195,15 @@ pub(super) fn stream(
     ctx: &egui::Context,
     c: &Colors,
     rows: &[Row],
-    live: Option<&ediabas::JobResult>,
+    live: Option<&MeasFrame>,
     stale: bool,
     lang: Lang,
 ) {
     ctx.request_repaint();
     // Build the two-up rows first so we know how many there are.
-    let cells_per_group: Vec<Vec<Cell>> = group_by_line(rows)
+    let cells_per_group: Vec<Vec<Cell>> = group_ranges(rows)
         .iter()
-        .map(|g| g.iter().filter_map(|r| cell_of(r, live, lang)).collect())
+        .map(|&(s, e)| (s..e).filter_map(|i| cell_of(i, &rows[i], live, lang)).collect())
         .collect();
     let rows2: Vec<&[Cell]> = cells_per_group.iter().flat_map(|c| c.chunks(2)).collect();
     if rows2.is_empty() {
@@ -228,12 +231,13 @@ pub(super) fn stream(
     }
 }
 
-fn cell_of(row: &Row, live: Option<&ediabas::JobResult>, lang: Lang) -> Option<Cell> {
+fn cell_of(idx: usize, row: &Row, live: Option<&MeasFrame>, lang: Lang) -> Option<Cell> {
     let label = tr_prg(row.label(), lang);
+    let cell = live.and_then(|f| f.cell(idx));
     match row {
         // Logical: On/Off state, NOT a bar.
         Row::Logical { on, off, .. } => {
-            let (v, _) = row_value(row, live);
+            let v = cell.and_then(|c| c.num);
             let (text, state) = match v {
                 Some(x) if x >= 0.5 => (on.trim().to_string(), Some(true)),
                 Some(_) => (off.trim().to_string(), Some(false)),
@@ -242,8 +246,14 @@ fn cell_of(row: &Row, live: Option<&ediabas::JobResult>, lang: Lang) -> Option<C
             Some(Cell::State { label, text, on: state })
         }
         // Analog: scaled bar.
-        Row::Analog { scale, .. } => {
-            let (v, unit) = row_value(row, live);
+        Row::Analog { scale, unit, .. } => {
+            let v = cell.and_then(|c| c.num);
+            // Unit: decoded (dynamic `_EINH` else the row's static unit) when a frame is
+            // present; the row's own static unit before the first frame lands.
+            let unit = cell
+                .map(|c| c.unit.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| unit.clone());
             let (value, pct) = match v {
                 Some(x) => {
                     let pct = if scale.max > scale.min {
@@ -339,7 +349,7 @@ pub(super) fn textinfo(
     c: &Colors,
     rows: &[Row],
     info: &[inpa::InfoLine],
-    live: Option<&ediabas::JobResult>,
+    live: Option<&MeasFrame>,
     app: &App,
     lang: Lang,
 ) {
@@ -352,36 +362,34 @@ pub(super) fn textinfo(
         return;
     }
     // Data page (ident / coding): surface why it's empty rather than showing silent dashes.
-    let have_data = live.is_some_and(|l| {
-        rows.iter().any(|r| r.result().is_some_and(|n| l.get_str(n).is_some()))
-    });
+    let have_data = live.is_some_and(|f| f.has_data());
     if !have_data {
         if app.info_busy {
             ui.label(RichText::new(t("reading_data", lang)).size(12.0).color(c.accent));
         } else if !app.status_msg.is_empty() {
             ui.label(RichText::new(app.status_msg.clone()).size(12.0).color(c.err));
-        } else if let Some(l) = live {
+        } else if let Some(f) = live {
             // The job answered but none of our result names matched — surface what it
             // actually returned so a name mismatch is diagnosable at a glance.
-            let names: Vec<&str> = l.sets().iter().flat_map(|s| s.names()).collect();
-            if names.is_empty() {
+            if f.raw_names.is_empty() {
                 ui.label(RichText::new(t("empty_response", lang)).size(12.0).color(c.warn));
             } else {
                 ui.label(RichText::new(t("no_fields", lang)).size(12.0).color(c.warn));
-                ui.label(RichText::new(names.join(", ")).size(11.0).monospace().color(c.fg_dim));
+                ui.label(RichText::new(f.raw_names.join(", ")).size(11.0).monospace().color(c.fg_dim));
             }
         } else if app.info_tries > 0 {
             ui.label(RichText::new(t("no_data", lang)).size(12.0).color(c.warn));
         }
         ui.add_space(6.0);
     }
-    for group in group_by_line(rows) {
-        let items: Vec<&Row> = group.iter().filter(|r| matches!(r, Row::Text { .. })).collect();
+    for (s, e) in group_ranges(rows) {
+        let items: Vec<(usize, &Row)> =
+            (s..e).filter(|&i| matches!(rows[i], Row::Text { .. })).map(|i| (i, &rows[i])).collect();
         for chunk in items.chunks(2) {
             ui.columns(2, |cols| {
                 for (j, col) in cols.iter_mut().enumerate() {
-                    if let Some(row) = chunk.get(j) {
-                        kv_line(col, c, row, live, lang);
+                    if let Some((idx, row)) = chunk.get(j) {
+                        kv_line(col, c, *idx, row, live, lang);
                     }
                 }
             });
@@ -411,10 +419,13 @@ fn info_row(ui: &mut egui::Ui, c: &Colors, line: &inpa::InfoLine, lang: Lang) {
 }
 
 /// One `label ……… value` line with an underline.
-fn kv_line(ui: &mut egui::Ui, c: &Colors, row: &Row, live: Option<&ediabas::JobResult>, lang: Lang) {
-    let Row::Text { result, .. } = row else { return };
+fn kv_line(ui: &mut egui::Ui, c: &Colors, idx: usize, row: &Row, live: Option<&MeasFrame>, lang: Lang) {
+    let Row::Text { .. } = row else { return };
     let label = tr_prg(row.label(), lang);
-    let value = live.and_then(|l| l.get_str(result)).unwrap_or_else(|| "—".into());
+    let value = live
+        .and_then(|f| f.cell(idx))
+        .and_then(|cell| cell.text.clone())
+        .unwrap_or_else(|| "—".into());
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::hover());
     let p = ui.painter_at(rect);
     p.text(Pos2::new(rect.left(), rect.center().y), Align2::LEFT_CENTER, &label, FontId::proportional(11.5), c.fg_dim);

@@ -8,7 +8,7 @@ use super::header;
 use crate::app::App;
 use crate::data::{self, DATA, SERIES};
 use crate::i18n::t;
-use crate::theme::palette;
+use crate::ui::theme::palette;
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
     header(app, ctx);
@@ -54,7 +54,7 @@ fn series_rail(app: &mut App, ctx: &egui::Context) {
 
 fn series_row(
     ui: &mut egui::Ui,
-    c: &crate::theme::Colors,
+    c: &crate::ui::theme::Colors,
     s: char,
     name: &str,
     count: usize,

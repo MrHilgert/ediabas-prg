@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use crate::lang::Lang;
-use crate::theme::Theme;
+use crate::ui::theme::Theme;
 
 /// Everything we remember between runs.
 #[derive(Clone, PartialEq, Eq)]

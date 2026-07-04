@@ -1,11 +1,10 @@
-//! The GUI constructor: builds screen 3 entirely from an ECU's `inpa::ScreenModule`.
+//! Конструктор экрана 3: строит его целиком из `inpa::ScreenModule` ЭБУ.
 //!
-//! Flow: chassis → ECU (hard-coded) → load the ECU's `.ipo` → extract its SGBD (`.prg`)
-//! and screen tree → render generically and (where a transport exists) stream live data.
-//! No per-ECU code: every menu, page, parameter, binding and F-key comes from the `.ipo`.
-//!
-//! Navigation mirrors INPA: a *view* is an active menu (the F-key bar) plus an optional
-//! open screen (the content). Selecting a menu item pushes a new view.
+//! Слой ОТРИСОВКИ: навигирует доменную модель экранов (`inpa`) ради разметки — меню,
+//! страницы, F-клавиши, подписи строк — и рисует значения из view-моделей (`app.live`
+//! типа `MeasFrame`, `app.faults` типа `FaultView`). Про коммуникацию с ЭБУ ничего не
+//! знает: любые действия уходят как `model::Intent`, данные приходят уже декодированными.
+//! Здесь нет ни `ediabas`, ни имён протокольных джобов.
 
 mod faults;
 mod widgets;
@@ -13,14 +12,20 @@ mod widgets;
 use std::rc::Rc;
 
 use egui::{Key, RichText};
-use inpa::model::{NavTarget, Row, ScreenKind, ScreenModule};
+use inpa::model::{NavTarget, ScreenKind, ScreenModule};
 
 use crate::app::{App, Link, Screen};
 use crate::ecu::{mods_for, Module};
 use crate::i18n::{t, tr_prg};
-use crate::screens::header;
-use crate::theme::palette;
-use crate::worker::{Cmd, Worker};
+use crate::model::Intent;
+use crate::ui::header;
+use crate::ui::theme::palette;
+
+/// UI-внутренние семантические токены F-клавиш страницы ошибок. Это НЕ имена джобов
+/// ЭБУ (те живут только в `link/`), а маркеры намерения: `apply` превращает их в
+/// `Intent::ReadFaults`/`ClearFaults`.
+const TOK_READ: &str = "@read_faults";
+const TOK_CLEAR: &str = "@clear_faults";
 
 /// One navigation level: which menu drives the F-keys, and which screen (if any) is open.
 #[derive(Clone, Copy)]
@@ -32,7 +37,12 @@ pub struct View {
 /// An action produced by a click or F-key, applied at end of frame.
 pub(super) enum Act {
     Open(View),
+    /// Nav/activation job from the `.ipo` (job/arg are inpa domain data, passed through).
     RunJob { job: String, arg: String },
+    /// Read fault memory (fault-page F1). Semantic — link maps it to the real job.
+    ReadFaults,
+    /// Clear fault memory (fault-page F2). Semantic — link maps it to the real job.
+    ClearFaults,
     ToggleFault(String),
     Back,
     Exit,
@@ -66,14 +76,13 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         return;
     };
 
-    lifecycle(app, &m, &sm, ctx);
+    lifecycle(app, &m, &sm);
 
     // Gate: a connectable ECU (real SGBD) must hold a LIVE link before its session
     // renders. While the handshake is in flight → blank backdrop only (the spinner is
     // `App::link_modal`, drawn above every screen). If it resolved WITHOUT a link
     // (Idle/Failed) → don't open a dead session: return to ECU-select, where the error
     // modal shows. Structure-only ECUs (no SGBD in the .ipo) skip the gate entirely.
-    // Worker events (incl. the connect result) are drained once in `App::update`.
     let connectable = !sm.sgbd.is_empty() || !sm.group_files.is_empty();
     if connectable && app.connected_code() != Some(m.code) {
         header(app, ctx);
@@ -175,15 +184,16 @@ fn displayable(it: &inpa::NavItem) -> bool {
 }
 
 /// Standard fault-page F-keys (INPA puts Read/Clear in the F-zone): F1 read, F2 clear,
-/// F10 back out of the fault screen.
+/// F10 back out of the fault screen. The read/clear targets carry UI semantic tokens, not
+/// ЭБУ job names — `item_action`/`apply` turn them into `Intent::ReadFaults`/`ClearFaults`.
 fn fault_fkeys() -> Vec<inpa::NavItem> {
     use inpa::model::{JobCall, NavItem};
-    let job = |name: &str| {
-        NavTarget::Job(JobCall { job: name.into(), arg: String::new(), selector: None })
+    let tok = |token: &str| {
+        NavTarget::Job(JobCall { job: token.into(), arg: String::new(), selector: None })
     };
     vec![
-        NavItem { fkey: 1, shifted: false, label: "Прочитать".into(), target: job("FS_LESEN") },
-        NavItem { fkey: 2, shifted: false, label: "Удалить".into(), target: job("FS_LOESCHEN") },
+        NavItem { fkey: 1, shifted: false, label: "Прочитать".into(), target: tok(TOK_READ) },
+        NavItem { fkey: 2, shifted: false, label: "Удалить".into(), target: tok(TOK_CLEAR) },
         NavItem { fkey: 10, shifted: false, label: "Назад".into(), target: NavTarget::Back },
     ]
 }
@@ -191,7 +201,7 @@ fn fault_fkeys() -> Vec<inpa::NavItem> {
 /// Render the already-filtered menu items as a clickable list, numbered by F-key.
 fn render_menu(
     ui: &mut egui::Ui,
-    c: &crate::theme::Colors,
+    c: &crate::ui::theme::Colors,
     items: &[inpa::NavItem],
     sm: &ScreenModule,
     view: &View,
@@ -212,7 +222,7 @@ fn render_screen(
     ui: &mut egui::Ui,
     app: &App,
     ctx: &egui::Context,
-    c: &crate::theme::Colors,
+    c: &crate::ui::theme::Colors,
     screen: &inpa::Screen,
     act: &mut Option<Act>,
 ) {
@@ -246,7 +256,13 @@ pub(super) fn item_action(sm: &ScreenModule, app: &App, view: &View, it: &inpa::
         NavTarget::Menu(mn) => Some(Act::Open(View { menu: *mn, screen: None })),
         NavTarget::Job(j) => {
             let _ = (sm, app);
-            Some(Act::RunJob { job: j.job.clone(), arg: j.arg.clone() })
+            // Fault-page F-keys carry UI semantic tokens; everything else is a real
+            // inpa-defined nav/activation job passed through to the ЭБУ-слой.
+            match j.job.as_str() {
+                TOK_READ => Some(Act::ReadFaults),
+                TOK_CLEAR => Some(Act::ClearFaults),
+                _ => Some(Act::RunJob { job: j.job.clone(), arg: j.arg.clone() }),
+            }
         }
         NavTarget::Back => Some(Act::Back),
         NavTarget::Exit => Some(Act::Exit),
@@ -271,16 +287,18 @@ fn apply(app: &mut App, a: Act) {
         }
         Act::Back => app.go_back(),
         Act::Exit => app.screen = Screen::Ecu,
+        Act::ReadFaults => {
+            app.faults_busy = true; // show a reading state until the result lands
+            app.faults_tries = app.faults_tries.saturating_add(1); // bounded auto-retry
+            app.worker.send(Intent::ReadFaults);
+        }
+        Act::ClearFaults => {
+            app.faults = None;
+            app.faults_busy = true; // clearing → re-read is driven by the ЭБУ-слой
+            app.worker.send(Intent::ClearFaults);
+        }
         Act::RunJob { job, arg } => {
-            if job == "FS_LESEN" || job == "FS_LOESCHEN" {
-                app.faults_busy = true; // show a reading/clearing state until the result lands
-            }
-            if job == "FS_LESEN" {
-                app.faults_tries = app.faults_tries.saturating_add(1); // bounded auto-retry
-            }
-            if let Some(w) = &app.worker {
-                w.send(Cmd::RunJob { job, args: arg });
-            }
+            app.worker.send(Intent::NavJob { job, arg });
         }
     }
 }
@@ -313,67 +331,57 @@ fn ensure_module(app: &mut App, m: &Module, _ctx: &egui::Context) {
 
 /// Resolve and parse `SGDAT/<script>.ipo`. The lookup is fully case-insensitive
 /// (name AND extension), so a catalog script `kombi` finds `KOMBI.IPO` on a
-/// case-sensitive (Linux) filesystem.
+/// case-sensitive (Linux) filesystem. This is the render-side copy for layout; the
+/// ЭБУ-слой parses its own copy for polling/decoding.
 fn load_ipo(script: &str) -> Option<ScreenModule> {
     let path = crate::i18n::resolve_ci("SGDAT", &format!("{script}.ipo"))?;
     inpa::parse(&path).ok()
 }
 
-/// Establish the transport link once, using the PRG the `.ipo` named. Only ECUs with a
-/// real SGBD on a built transport (DDE/DS2 today) connect; the rest render structure-only.
-fn lifecycle(app: &mut App, m: &Module, sm: &ScreenModule, ctx: &egui::Context) {
-    // Connectability follows the .ipo's own SGBD (what the connect actually opens),
-    // NOT the catalog `m.prg` mapping — so every ECU whose .ipo names an SGBD gets a
-    // real connect attempt (and its loading modal), and only a missing SGBD stays
-    // structure-only. `m` (bus/addr) is still used elsewhere.
+/// Establish the transport link once. The UI only names the ECU (`script`/`code`) and the
+/// chosen port; the ЭБУ-слой resolves SGBD/groups/variant and opens the transport. Only
+/// ECUs whose `.ipo` names an SGBD get a connect attempt; the rest render structure-only.
+fn lifecycle(app: &mut App, m: &Module, sm: &ScreenModule) {
     let connectable = !sm.sgbd.is_empty() || !sm.group_files.is_empty();
-    // Send the ONE Cmd::Connect for this session while fresh (Idle). A Failed attempt
-    // does NOT auto-retry — the link modal's Retry re-arms it via `App::start_connect`.
+    // Send the ONE Connect for this session while fresh (Idle). A Failed attempt does NOT
+    // auto-retry — the link modal's Retry re-arms it via `App::start_connect`.
     if connectable && matches!(app.link, Link::Idle) {
-        let prg = format!("{}.prg", sm.sgbd); // fallback SGBD from the .ipo
-        // Port from settings (or first available if set to auto); fall back to COM3.
-        let port = app.active_port().unwrap_or_else(|| "COM3".into());
-        // The `.ipo` names address-keyed group files (`D_<ADDR>`); the worker runs each
-        // group's IDENTIFIKATION → VARIANTE to resolve the concrete variant SGBD before
-        // opening the real session (INPA variant identification).
-        let groups = sm.group_files.clone();
-        let w = app.worker.get_or_insert_with(|| Worker::spawn(ctx.clone()));
-        w.send(Cmd::Connect { port, baud: 9600, prg, groups });
+        // Script name = the .ipo stem the ЭБУ-слой will (re)parse to resolve the SGBD.
+        let script = m.script.unwrap_or(m.code).to_string();
+        let port = app.active_port(); // "" = auto (link resolves to first available)
+        app.iface = Some(m.bus.to_string()); // header chip shows the catalog protocol family
+        app.worker.send(Intent::Connect { script, port });
         app.link = Link::Connecting { code: m.code };
     }
 }
 
-/// Start/stop/switch the live poll for the open data-stream screen.
+/// Start/stop/switch the live poll for the open data-stream screen. The UI only tells the
+/// ЭБУ-слой WHICH screen is live (`Intent::SetLive`); the poll list + decode live there.
 fn update_poll(app: &mut App, m: &Module, sm: &ScreenModule, view: &View) {
-    let desired = if app.connected_code() == Some(m.code) {
+    let desired: Option<usize> = if app.connected_code() == Some(m.code) {
         view.screen
-            .and_then(|s| sm.as_screen(s))
-            .filter(|s| s.kind == ScreenKind::DataStream)
-            // 0 = poll as fast as the transport allows (worker floors the tick to 20 ms);
-            // the real rate is bound by the DS2 exchange time, not an artificial delay.
-            .map(|s| (poll_reqs(s), 0u64))
-            .filter(|(reqs, _)| !reqs.is_empty())
+            .and_then(|s| sm.as_screen(s).map(|sc| (s, sc.kind)))
+            .filter(|(_, kind)| *kind == ScreenKind::DataStream)
+            .map(|(id, _)| id)
     } else {
         None
     };
-    if desired != app.stream_poll {
-        if let Some(w) = &app.worker {
-            match &desired {
-                Some((reqs, ms)) => w.send(Cmd::StartStream { reqs: reqs.clone(), interval_ms: *ms }),
-                None => w.send(Cmd::StopStream),
+    if desired != app.live_screen {
+        match desired {
+            Some(id) => app.worker.send(Intent::SetLive(id)),
+            None => {
+                app.worker.send(Intent::StopLive);
+                app.live = None;
             }
         }
-        if desired.is_none() {
-            app.live = None;
-        }
-        app.stream_poll = desired;
-        app.streaming = app.stream_poll.is_some();
+        app.live_screen = desired;
+        app.streaming = desired.is_some();
     }
 }
 
-/// One-shot loader for a TextInfo screen (ident / info / coding): its data is static,
-/// so instead of streaming we run the screen's feeder + row jobs a single time when it
-/// opens, letting the results land in `app.live` (same overlay path as the stream).
+/// One-shot loader for a TextInfo screen (ident / info / coding): its data is static, so
+/// the ЭБУ-слой reads it once (`Intent::OpenInfo`) and the decoded frame lands in
+/// `app.live`. A transient first-read miss is retried a bounded number of times.
 fn update_textinfo(app: &mut App, m: &Module, sm: &ScreenModule, view: &View) {
     let target = view
         .screen
@@ -383,15 +391,8 @@ fn update_textinfo(app: &mut App, m: &Module, sm: &ScreenModule, view: &View) {
         app.info_for = None; // left the TextInfo screen — re-read on next open
         return;
     };
-    let reqs = sm.as_screen(sid).map(poll_reqs).unwrap_or_default();
-    let send = |app: &mut App| {
-        if let Some(w) = &app.worker {
-            for (job, arg) in &reqs {
-                w.send(Cmd::RunJob { job: job.clone(), args: arg.clone() });
-            }
-        }
-        app.info_busy = true;
-    };
+    let has_rows = sm.as_screen(sid).map(|sc| !sc.rows.is_empty()).unwrap_or(false);
+    let no_data = app.live.as_ref().map_or(true, |f| !f.has_data());
     if app.info_for != Some(sid) {
         // A new TextInfo screen just opened → clear stale state and fetch this one once.
         app.info_for = Some(sid);
@@ -399,64 +400,16 @@ fn update_textinfo(app: &mut App, m: &Module, sm: &ScreenModule, view: &View) {
         app.info_busy = false;
         app.live = None;
         app.status_msg.clear();
-        if !reqs.is_empty() {
-            send(app);
+        if has_rows {
+            app.worker.send(Intent::OpenInfo(sid));
+            app.info_busy = true;
             app.info_tries = 1;
         }
-    } else if !reqs.is_empty() && app.live.is_none() && !app.info_busy && app.info_tries < 3 {
+    } else if has_rows && no_data && !app.info_busy && app.info_tries < 3 {
         // The previous read finished without data (a transient timeout on the stream→job
         // transition can eat the first request) → retry, up to a small cap.
-        send(app);
+        app.worker.send(Intent::OpenInfo(sid));
+        app.info_busy = true;
         app.info_tries += 1;
     }
-}
-
-/// The per-tick request list for a data-stream screen: batch `MW_SELECT_LESEN_NORM`
-/// selectors (≤10 per request), run other jobs individually, plus the feeder once.
-fn poll_reqs(screen: &inpa::Screen) -> Vec<(String, String)> {
-    let mut selectors: Vec<String> = Vec::new();
-    let mut jobs: Vec<(String, String)> = Vec::new();
-    let mut push_job = |job: &str, arg: &str| {
-        if !job.is_empty() && !jobs.iter().any(|(j, a)| j == job && a == arg) {
-            jobs.push((job.to_string(), arg.to_string()));
-        }
-    };
-    if let Some(f) = &screen.feeder {
-        if f.job != "MW_SELECT_LESEN_NORM" {
-            push_job(&f.job, &f.arg);
-        }
-    }
-    for row in &screen.rows {
-        let j = row.job();
-        match &j.selector {
-            Some(sel) if j.job == "MW_SELECT_LESEN_NORM" => {
-                if !selectors.contains(sel) {
-                    selectors.push(sel.clone());
-                }
-            }
-            _ => push_job(&j.job, &j.arg),
-        }
-    }
-    let mut reqs: Vec<(String, String)> = selectors
-        .chunks(10)
-        .map(|c| ("MW_SELECT_LESEN_NORM".to_string(), c.concat()))
-        .collect();
-    reqs.extend(jobs);
-    reqs
-}
-
-/// Read a row's live value + unit from the polled `JobResult`.
-pub(crate) fn row_value(row: &Row, live: Option<&ediabas::JobResult>) -> (Option<f64>, String) {
-    let Some(res) = row.result() else { return (None, String::new()) };
-    let v = live.and_then(|l| l.get_f64(res));
-    let unit = match row {
-        Row::Analog { unit, .. } => res
-            .strip_suffix("_WERT")
-            .map(|b| format!("{b}_EINH"))
-            .and_then(|k| live.and_then(|l| l.get_str(&k)))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| unit.clone()),
-        _ => String::new(),
-    };
-    (v, unit)
 }

@@ -8,13 +8,14 @@ use super::Act;
 use crate::app::App;
 use crate::i18n::t;
 use crate::lang::Lang;
-use crate::theme::Colors;
+use crate::model::DtcView;
+use crate::ui::theme::Colors;
 
 /// The whole fault page.
 pub(super) fn render(ui: &mut egui::Ui, c: &Colors, app: &App, act: &mut Option<Act>, lang: Lang) {
-    // Auto-read on open (bounded retry — a first FS_LESEN after streaming can time out).
+    // Auto-read on open (bounded retry — a first read after streaming can time out).
     if app.connected_code().is_some() && app.faults_tries < 3 && app.faults.is_none() && !app.faults_busy {
-        *act = Some(Act::RunJob { job: "FS_LESEN".into(), arg: String::new() });
+        *act = Some(Act::ReadFaults);
     }
     ui.label(
         RichText::new(t("faults_fkeys", lang)).size(11.0).color(c.fg_faint),
@@ -36,7 +37,7 @@ pub(super) fn render(ui: &mut egui::Ui, c: &Colors, app: &App, act: &mut Option<
         );
         return;
     };
-    let dtcs = parse_dtcs(fr);
+    let dtcs = &fr.dtcs;
     if dtcs.is_empty() {
         ui.label(RichText::new(t("faults_empty", lang)).size(13.0).strong().color(c.ok));
         return;
@@ -47,7 +48,7 @@ pub(super) fn render(ui: &mut egui::Ui, c: &Colors, app: &App, act: &mut Option<
             .color(c.fg_faint),
     );
     ui.add_space(6.0);
-    for d in &dtcs {
+    for d in dtcs {
         let expanded = app.fault_open.as_deref() == Some(d.code.as_str());
         let (slabel, scol) = fault_status(c, d.present, d.sporadic, lang);
         if fault_row(ui, c, &d.code, &d.text, &slabel, scol, expanded) {
@@ -57,100 +58,6 @@ pub(super) fn render(ui: &mut egui::Ui, c: &Colors, app: &App, act: &mut Option<
             real_fault_detail(ui, c, d, lang);
         }
     }
-}
-
-// ───────────────────────────────── model ─────────────────────────────────
-
-struct Uw {
-    text: String,
-    val: String,
-    unit: String,
-}
-
-/// One decoded DTC from `FS_LESEN`.
-struct Dtc {
-    code: String,        // e.g. "1E00"
-    text: String,        // F_ORT_TEXT
-    present: bool,       // F_VORHANDEN — currently active
-    sporadic: bool,      // F_ART "sporadischer Fehler" flag
-    raw: String,         // F_HEX_CODE
-    hfk: i64,            // F_HFK  — occurrences
-    lz: i64,             // F_LZ   — lifetime counter
-    uw_satz: i64,        // F_UW_SATZ — number of freeze-frame snapshots
-    uw: Vec<Uw>,         // F_UW1..N — freeze-frame conditions
-    causes: Vec<String>, // F_ART{i}_TEXT != "--" — fault types/causes
-}
-
-fn fmt_uw(v: f64) -> String {
-    if v.fract().abs() < 0.05 {
-        format!("{v:.0}")
-    } else {
-        format!("{v:.1}")
-    }
-}
-
-/// Parse the `FS_LESEN` result into a DTC list (one per set carrying `F_ORT_NR`).
-fn parse_dtcs(fr: &ediabas::JobResult) -> Vec<Dtc> {
-    let mut out = Vec::new();
-    for set in fr.sets() {
-        if !set.contains("F_ORT_NR") {
-            continue; // e.g. the trailing JOB_STATUS set
-        }
-        let code_num = set.get_i64("F_ORT_NR").unwrap_or(0);
-        let text = set.get_str("F_ORT_TEXT").unwrap_or_default().trim().to_string();
-        if code_num == 0 && text.is_empty() {
-            continue;
-        }
-        // Freeze-frame: F_UW{i}_TEXT/_WERT/_EINH, contiguous from 1.
-        let mut uw = Vec::new();
-        for i in 1..=64 {
-            let tkey = format!("F_UW{i}_TEXT");
-            if !set.contains(&tkey) {
-                break;
-            }
-            let val = set
-                .get_f64(&format!("F_UW{i}_WERT"))
-                .map(fmt_uw)
-                .or_else(|| set.get_str(&format!("F_UW{i}_WERT")))
-                .unwrap_or_default();
-            uw.push(Uw {
-                text: set.get_str(&tkey).unwrap_or_default().trim().to_string(),
-                val,
-                unit: set.get_str(&format!("F_UW{i}_EINH")).unwrap_or_default().trim().to_string(),
-            });
-        }
-        // Fault types/causes: F_ART{i}_TEXT. Skip "--" and the high-numbered status-flag
-        // entries (NR >= 0xEB, already shown as Status). Keep real causes.
-        let mut causes = Vec::new();
-        let mut sporadic = false;
-        for i in 1..=64 {
-            let key = format!("F_ART{i}_TEXT");
-            if !set.contains(&key) {
-                break;
-            }
-            let nr = set.get_i64(&format!("F_ART{i}_NR")).unwrap_or(0);
-            let txt = set.get_str(&key).unwrap_or_default().trim().to_string();
-            if txt.to_lowercase().contains("sporadisch") {
-                sporadic = true;
-            }
-            if nr > 0 && nr < 0xEB && !txt.is_empty() && txt != "--" {
-                causes.push(txt);
-            }
-        }
-        out.push(Dtc {
-            code: format!("{:04X}", (code_num as u32) & 0xffff),
-            text,
-            present: set.get_i64("F_VORHANDEN").unwrap_or(0) != 0,
-            sporadic,
-            raw: set.get_str("F_HEX_CODE").unwrap_or_default().trim().to_string(),
-            hfk: set.get_i64("F_HFK").unwrap_or(0),
-            lz: set.get_i64("F_LZ").unwrap_or(0),
-            uw_satz: set.get_i64("F_UW_SATZ").unwrap_or(0),
-            uw,
-            causes,
-        });
-    }
-    out
 }
 
 // ──────────────────────────────── render ─────────────────────────────────
@@ -244,7 +151,7 @@ fn kv_grid(ui: &mut egui::Ui, c: &Colors, cells: &[KvCell]) {
     }
 }
 
-fn real_fault_detail(ui: &mut egui::Ui, c: &Colors, d: &Dtc, lang: Lang) {
+fn real_fault_detail(ui: &mut egui::Ui, c: &Colors, d: &DtcView, lang: Lang) {
     egui::Frame::none()
         .inner_margin(egui::Margin { left: 24.0, right: 8.0, top: 4.0, bottom: 10.0 })
         .show(ui, |ui| {

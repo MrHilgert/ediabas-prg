@@ -15,10 +15,9 @@ mod data;
 mod ecu;
 mod i18n;
 mod lang;
-mod screens;
-mod session;
-mod theme;
-mod worker;
+mod link;
+mod model;
+mod ui;
 
 use app::App;
 

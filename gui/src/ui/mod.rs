@@ -1,14 +1,19 @@
-//! Screens + shared chrome (header, status bar) and small paint helpers.
+//! Слой ОТРИСОВКИ (egui, НЕ ediabas): экраны, общий хром (шапка, настройки) и
+//! мелкие примитивы. Рисует по view-моделям из `crate::model`; про коммуникацию с
+//! ЭБУ ничего не знает — команды уходят через `crate::model::Intent`, данные приходят
+//! готовыми (`MeasFrame`/`FaultView`/`ConnInfo`).
 
 pub mod chassis_select;
 pub mod ecu_select;
+pub mod session;
+pub mod theme;
 
 use egui::{Color32, RichText, Sense, Stroke, Vec2};
 
 use crate::app::App;
 use crate::i18n::t;
 use crate::lang::Lang;
-use crate::theme::{palette, Colors, Theme};
+use theme::{palette, Colors, Theme};
 
 /// A filled status dot of diameter `d`.
 pub fn dot(ui: &mut egui::Ui, color: Color32, d: f32) {
@@ -172,7 +177,9 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                                 ui.label(
                                     RichText::new(t("interface", app.lang)).size(10.0).color(c.fg_dim),
                                 );
-                                ui.label(RichText::new("D-CAN").size(10.0).color(c.fg));
+                                // Реальный протокол активной связи (из ConnInfo); до
+                                // коннекта — прочерк. Больше не литерал "D-CAN".
+                                ui.label(RichText::new(app.iface_label()).size(10.0).color(c.fg));
                             });
                         });
                 });

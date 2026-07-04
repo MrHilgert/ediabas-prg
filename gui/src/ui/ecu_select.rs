@@ -7,7 +7,7 @@ use super::header;
 use crate::app::{App, Screen};
 use crate::ecu::{mods_for, Category, Module};
 use crate::i18n::t;
-use crate::theme::{palette, Colors};
+use crate::ui::theme::{palette, Colors};
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
     // Worker events (incl. connect result) are drained once in `App::update`; the

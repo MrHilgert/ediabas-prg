@@ -7,9 +7,10 @@ use crate::config::Settings;
 use crate::data::{self, DATA};
 use crate::ecu::Category;
 use crate::lang::Lang;
-use crate::screens;
-use crate::theme::{self, Theme};
-use crate::worker::Worker;
+use crate::link::Worker;
+use crate::model::{FaultView, MeasFrame};
+use crate::ui;
+use crate::ui::theme::{self, Theme};
 
 /// Register Inter as the UI font (modern, high-legibility, full Cyrillic),
 /// ahead of egui's thin default. Used for both proportional and monospace text
@@ -75,23 +76,25 @@ pub struct App {
     // Session (screen 3): the ECU's parsed .ipo screen tree + navigation.
     pub module: Option<std::rc::Rc<inpa::ScreenModule>>, // loaded .ipo for the current ECU
     pub module_for: Option<&'static str>,   // which ECU code `module` was loaded for
-    pub nav: Vec<crate::session::View>,     // view stack (menu + optional screen)
+    pub nav: Vec<crate::ui::session::View>, // view stack (menu + optional screen)
     pub fault_open: Option<String>,         // expanded fault code
     pub info_for: Option<usize>,            // TextInfo screen whose feeder we've read once
     pub info_tries: u8,                     // TextInfo feeder read attempts (bounded retry)
-    pub info_busy: bool,                    // a TextInfo feeder job is in flight
-    pub faults: Option<ediabas::JobResult>, // real FS_LESEN result (DDE)
+    pub info_busy: bool,                    // a TextInfo feeder read is in flight
+    pub faults: Option<FaultView>,          // decoded FS_LESEN view-model (from link)
     pub faults_busy: bool,                  // an FS_LESEN/FS_LOESCHEN is in flight
     pub faults_tries: u8,                   // auto-read attempts this visit (bounded retry)
 
-    // Diagnostic worker (spun up on CONNECT). None until screen 2 connects.
-    pub worker: Option<Worker>,
+    // Diagnostic worker (ЭБУ-слой). Spun up at App::new so ports/connect are always
+    // reachable; idles until a Connect intent arrives.
+    pub worker: Worker,
     pub status_msg: String,
     // Real connection / live data (screen 3, DDE via MW_SELECT_LESEN_NORM)
     pub link: Link,                        // connection state machine (see `Link`)
-    pub streaming: bool,                   // a StartStream is active
-    pub live: Option<ediabas::JobResult>,  // latest polled measurement set
-    pub stream_poll: Option<(Vec<(String, String)>, u64)>, // active per-page poll: (reqs, interval_ms)
+    pub iface: Option<String>,             // protocol label of the live link (header chip)
+    pub streaming: bool,                   // a live poll is active
+    pub live: Option<MeasFrame>,           // latest decoded measurement frame (from link)
+    pub live_screen: Option<usize>,        // screen id the live poll is bound to
     // Comms-activity pulse for the header link dot.
     pub comms_seq: u64,                    // bumped on every completed exchange
     pub comms_seen: u64,                   // last seq the header observed
@@ -123,6 +126,11 @@ impl App {
         // Default selection: E46 (the reference DDE chassis), first body.
         let e46 = DATA.iter().position(|c| c.code == "E46");
 
+        // Spin the ЭБУ-слой worker up-front. `wake` just pokes egui to repaint after an
+        // update lands — the worker itself never names egui (clean layer boundary).
+        let wake_ctx = cc.egui_ctx.clone();
+        let worker = Worker::spawn(Box::new(move || wake_ctx.request_repaint()));
+
         Self {
             theme,
             lang: settings.lang,
@@ -143,12 +151,13 @@ impl App {
             faults: None,
             faults_busy: false,
             faults_tries: 0,
-            worker: None,
+            worker,
             status_msg: String::new(),
             link: Link::Idle,
+            iface: None,
             streaming: false,
             live: None,
-            stream_poll: None,
+            live_screen: None,
             comms_seq: 0,
             comms_seen: 0,
             comms_at: 0.0,
@@ -162,21 +171,28 @@ impl App {
         }
     }
 
-    /// Open the settings popup, refreshing the list of serial ports.
+    /// Open the settings popup, asking the ЭБУ-слой to (re)enumerate serial ports.
+    /// The list arrives asynchronously as `Update::Ports` — the picker shows the last
+    /// known list meanwhile. The UI never calls `available_ports` itself.
     pub fn open_settings(&mut self) {
-        self.ports = ediabas::available_ports();
+        self.worker.send(crate::model::Intent::RefreshPorts);
         self.show_settings = true;
     }
 
-    /// Re-enumerate serial ports (settings "Refresh" button).
+    /// Re-enumerate serial ports (settings "Refresh" button) via the ЭБУ-слой.
     pub fn refresh_ports(&mut self) {
-        self.ports = ediabas::available_ports();
+        self.worker.send(crate::model::Intent::RefreshPorts);
     }
 
-    /// The serial port CONNECT will actually use: the chosen one, or the first
-    /// available if set to auto. `None` only when auto and nothing is present.
-    pub fn active_port(&self) -> Option<String> {
-        self.port.clone().or_else(|| ediabas::available_ports().into_iter().next())
+    /// The serial port CONNECT will use: the chosen one, or an empty string meaning
+    /// "auto" (the ЭБУ-слой resolves auto → first available, so the UI needs no port list).
+    pub fn active_port(&self) -> String {
+        self.port.clone().unwrap_or_default()
+    }
+
+    /// Header interface chip label: the live link's protocol, or a dash before connect.
+    pub fn iface_label(&self) -> String {
+        self.iface.clone().unwrap_or_else(|| "—".to_string())
     }
 
     /// Current settings as reflected by live UI state.
@@ -239,7 +255,8 @@ impl App {
         self.faults_busy = false;
         self.streaming = false;
         self.live = None;
-        self.stream_poll = None;
+        self.live_screen = None;
+        self.iface = None;
         self.status_msg.clear();
     }
 
@@ -269,20 +286,20 @@ impl App {
         }
     }
 
-    /// Drain ONE worker event into app state — the single place connection + session
-    /// events are handled (formerly split between `ecu_select::poll_connect` and
-    /// `session::drain_worker`).
-    pub fn apply_event(&mut self, evt: crate::worker::Event) {
-        use crate::worker::{Cmd, ConnectError, Event};
-        match evt {
-            Event::Connected { .. } => {
+    /// Drain ONE update from the ЭБУ-слой into app state — the single place connection +
+    /// session updates are handled. Payloads are plain view-models (`crate::model`); no
+    /// `ediabas` type ever reaches here.
+    pub fn apply_update(&mut self, up: crate::model::Update) {
+        use crate::model::{ConnReason, Update};
+        match up {
+            Update::Connected => {
                 // A handshake completed → promote Connecting → Connected.
                 if let Link::Connecting { code } = self.link {
                     self.link = Link::Connected { code };
                 }
                 self.status_msg.clear();
             }
-            Event::PollMiss(_) => {
+            Update::PollMiss => {
                 // Transient bus glitch: hold the last values AND the link. Only after
                 // several consecutive misses treat it as a real disconnect.
                 const MISS_LIMIT: u32 = 8;
@@ -295,52 +312,48 @@ impl App {
                     self.status_msg = crate::i18n::t("no_link", self.lang);
                 }
             }
-            Event::JobDone { job, result } => {
-                self.comms_seq = self.comms_seq.wrapping_add(1); // a real exchange completed → pulse
-                self.comms_miss = 0; // link is live again
-                if job == "FS_LESEN" {
-                    self.faults = Some(result);
-                    self.faults_busy = false;
-                } else if job == "FS_LOESCHEN" {
-                    self.faults = None;
-                    self.faults_busy = true; // re-read after clearing; keep the busy state
-                    if let Some(w) = &self.worker {
-                        w.send(Cmd::RunJob { job: "FS_LESEN".into(), args: String::new() });
-                    }
-                } else {
-                    self.info_busy = false; // a TextInfo feeder read completed
-                    // Overlay onto the held set so a value missing this tick keeps its last
-                    // reading instead of blanking — steady display, no per-tick flicker.
-                    match &mut self.live {
-                        Some(cur) => cur.overlay(result),
-                        None => self.live = Some(result),
-                    }
-                }
+            Update::Live(frame) => {
+                // A live/textinfo poll produced a decoded frame (link already overlaid it
+                // across ticks). Replace wholesale — no per-tick ediabas access in the UI.
+                self.comms_seq = self.comms_seq.wrapping_add(1); // real exchange → pulse
+                self.comms_miss = 0;
+                self.info_busy = false;
+                self.live = Some(frame);
             }
-            Event::ConnectFailed(kind) => {
+            Update::Faults(view) => {
+                self.comms_seq = self.comms_seq.wrapping_add(1);
+                self.comms_miss = 0;
+                self.faults = Some(view);
+                self.faults_busy = false;
+            }
+            Update::Ports(list) => {
+                self.ports = list;
+            }
+            Update::ConnectFailed(reason) => {
                 // A connect attempt failed → no link. Map the classified cause to a
                 // localized reason so "no adapter" reads differently from an ECU timeout.
                 self.faults_busy = false;
                 self.info_busy = false;
                 self.streaming = false;
-                let key = match kind {
-                    ConnectError::NoPort => "err_no_adapter",
-                    ConnectError::PortBusy => "err_port_busy",
-                    ConnectError::NoResponse => "err_no_response",
-                    ConnectError::Other(_) => "err_generic",
+                let key = match reason {
+                    ConnReason::NoPort => "err_no_adapter",
+                    ConnReason::PortBusy => "err_port_busy",
+                    ConnReason::NoResponse => "err_no_response",
+                    ConnReason::Other(detail) => {
+                        // Keep the raw cause in the trace; the modal shows only the generic
+                        // localized reason.
+                        eprintln!("eDIAG: коннект не удался — {detail}");
+                        "err_generic"
+                    }
                 };
                 self.link = Link::Failed { reason: crate::i18n::t(key, self.lang) };
             }
-            Event::Error(e) => {
-                // A job failed mid-session (e.g. one FS_LESEN telegram) — keep the link,
-                // just surface it. A truly dead bus is caught by the stream miss-counter.
+            Update::Notice(msg) => {
+                // A job failed mid-session — keep the link, just surface it. A truly dead
+                // bus is caught by the stream miss-counter.
                 self.faults_busy = false;
                 self.info_busy = false;
-                self.status_msg = format!("{}: {e}", crate::i18n::t("job_error", self.lang));
-            }
-            Event::Disconnected => {
-                self.link = Link::Idle;
-                self.streaming = false;
+                self.status_msg = format!("{}: {msg}", crate::i18n::t("job_error", self.lang));
             }
         }
     }
@@ -481,24 +494,23 @@ impl eframe::App for App {
         // Keep the clock / pulse animating.
         ctx.request_repaint_after(Duration::from_secs(1));
 
-        // Single worker-event drain for the whole app (connection + session events),
+        // Single update drain for the whole app (connection + session updates),
         // BEFORE any screen renders, so every screen sees a consistent `link`.
-        let events = self.worker.as_ref().map(|w| w.poll()).unwrap_or_default();
-        for evt in events {
-            self.apply_event(evt);
+        for up in self.worker.poll() {
+            self.apply_update(up);
         }
 
         match self.screen {
-            Screen::Chassis => screens::chassis_select::show(self, ctx),
-            Screen::Ecu => screens::ecu_select::show(self, ctx),
-            Screen::Session => crate::session::show(self, ctx),
+            Screen::Chassis => ui::chassis_select::show(self, ctx),
+            Screen::Ecu => ui::ecu_select::show(self, ctx),
+            Screen::Session => ui::session::show(self, ctx),
         }
 
         // The connect overlay (spinner / error) renders above every screen.
         self.link_modal(ctx);
         // Settings popup renders above any screen; persist any change it (or the
         // header toggles) made this frame.
-        screens::settings_modal(self, ctx);
+        ui::settings_modal(self, ctx);
         self.persist_if_changed();
     }
 }

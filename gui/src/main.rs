@@ -22,20 +22,23 @@ mod worker;
 
 use app::App;
 
-/// Turn the `ediabas` protocol trace ON for the GUI so a failed connect leaves a log
-/// to inspect (TX/RX telegrams, protocol config, table lookups). Writes to
-/// `ediabas-trace.log` in the working directory — same file the CLI uses. An explicit
-/// `EDIABAS_TRACE` from the environment (e.g. `=2` for the per-opcode firehose, or a
-/// custom path) is respected and left untouched.
+/// The `ediabas` protocol trace is OPT-IN via the `EDIABAS_TRACE` env var (same as
+/// the CLI): unset → off. `EDIABAS_TRACE=1` → `ediabas-trace.log` in the cwd; `=2` →
+/// per-opcode firehose; `=<path>` → a custom file. We don't force it on — just print
+/// where the log goes when the user did enable it, so a failed connect is easy to find.
 fn init_trace() {
-    if std::env::var_os("EDIABAS_TRACE").is_some() {
-        return;
+    match std::env::var("EDIABAS_TRACE") {
+        Ok(v) if !v.is_empty() => {
+            let where_ = match v.as_str() {
+                "1" | "true" | "on" | "2" | "verbose" | "all" => std::env::current_dir()
+                    .map(|d| d.join("ediabas-trace.log").display().to_string())
+                    .unwrap_or_else(|_| "ediabas-trace.log".to_string()),
+                path => path.to_string(),
+            };
+            eprintln!("eDIAG: протокольный трейс включён (EDIABAS_TRACE={v}) → {where_}");
+        }
+        _ => {}
     }
-    std::env::set_var("EDIABAS_TRACE", "1"); // → ediabas-trace.log in the cwd
-    let where_ = std::env::current_dir()
-        .map(|d| d.join("ediabas-trace.log").display().to_string())
-        .unwrap_or_else(|_| "ediabas-trace.log".to_string());
-    eprintln!("eDIAG: протокольный трейс включён → {where_}");
 }
 
 fn main() -> eframe::Result<()> {

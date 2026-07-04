@@ -24,16 +24,6 @@ impl Category {
         Category::Gwy,
         Category::Inf,
     ];
-    pub fn id(self) -> &'static str {
-        match self {
-            Category::Pwr => "PWR",
-            Category::Chs => "CHS",
-            Category::Saf => "SAF",
-            Category::Bdy => "BDY",
-            Category::Gwy => "GWY",
-            Category::Inf => "INF",
-        }
-    }
     pub fn label(self, lang: Lang) -> &'static str {
         match (self, lang) {
             (Category::Pwr, Lang::Ru) => "СИЛОВОЙ АГРЕГАТ",

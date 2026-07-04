@@ -5,15 +5,10 @@ const MAGIC: &[u8] = b"@EDIABAS OBJECT\0";
 const XOR_KEY: u8 = 0xf7;
 
 // Pointer table at offset 0x78 in the header (8 x u32 LE)
-const _PTR_SIG: usize = 0x78;     // signature/checksum section
-const _PTR_JOB2: usize = 0x7c;    // secondary job-table reference
 const PTR_CODE: usize = 0x80;     // start of bytecode (always 0xa0)
-const _PTR_RESULTS: usize = 0x84; // result/parameter table
 const PTR_JOBS: usize = 0x88;     // job name table
-const _PTR_PARAMS: usize = 0x8c;  // parameter table
 const PTR_RESULTS: usize = 0x84;  // results/parameters section
 const PTR_SGBD: usize = 0x90;     // ECU + full SGBD metadata block
-const _PTR_VARS: usize = 0x94;    // variable/register table (binary)
 
 const JOB_ENTRY_SIZE: usize = 68;
 const JOB_NAME_LEN: usize = 64; // first 64 bytes = name (null-padded)

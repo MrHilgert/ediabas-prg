@@ -47,9 +47,6 @@ enum Command {
         /// Run this init job first (e.g. INITIALISIERUNG)
         #[arg(long, value_name = "JOB_NAME")]
         init_job: Option<String>,
-        /// Enable TX echo reading (only if adapter mirrors TX back on RX)
-        #[arg(long)]
-        echo: bool,
         /// LEN byte position in ECU response: 1=concept-0x0006, 2=concept-0x0001
         #[arg(long, default_value = "1")]
         len_offset: usize,
@@ -206,7 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
-        Command::Run { prg: prg_path, job, port, baud, kline_init, init_job, echo, len_offset, interbyte, args, repeat } => {
+        Command::Run { prg: prg_path, job, port, baud, kline_init, init_job, len_offset, interbyte, args, repeat } => {
             let arg_buf: Vec<u8> = args.unwrap_or_default().into_bytes();
             let prg_file = prg::PrgFile::open(&prg_path).unwrap_or_else(|e| {
                 eprintln!("Error opening .prg: {e}"); std::process::exit(1);
@@ -227,8 +224,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut ds2 = transport::ds2::Ds2Transport::new(Box::new(serial));
                     // KDCAN/FTDI K-line adapters mirror TX back on RX — always drain the
                     // echo so it can't be mistaken for (or shift) the ECU response.
-                    // (`--echo` kept for compatibility; draining is now unconditional.)
-                    let _ = echo;
                     ds2.echo = true;
                     ds2.len_offset = len_offset;
                     ds2.interbyte_ms = interbyte;

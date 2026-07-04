@@ -55,7 +55,6 @@ pub struct App {
     // ECU-select state
     pub ecu_cat: Option<Category>,          // active category filter (always Some once on screen 2)
     pub ecu_sel: Option<&'static str>,      // selected module code
-    pub scan_pct: f32,                       // 0..100 module-scan animation
     pub connect_error: Option<String>,      // last connect failure → error popup on screen 2
 
     // Session (screen 3): the ECU's parsed .ipo screen tree + navigation.
@@ -121,7 +120,6 @@ impl App {
             query: String::new(),
             ecu_cat: Some(Category::Pwr),
             ecu_sel: None,
-            scan_pct: 0.0,
             connect_error: None,
             module: None,
             module_for: None,
@@ -274,7 +272,6 @@ impl App {
         self.ecu_sel = crate::ecu::mods_for(&DATA[self.chassis.unwrap_or(0)])
             .first()
             .map(|m| m.code);
-        self.scan_pct = 0.0;
     }
 }
 

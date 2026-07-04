@@ -41,6 +41,22 @@ pub enum Screen {
     Session,
 }
 
+/// Connection lifecycle as one explicit state machine (replaces the old scattered
+/// `connected`/`connect_pending`/`connect_attempted`/`connect_error` booleans). Exactly
+/// one variant holds at a time, so the UI can never be e.g. "pending AND connected".
+#[derive(Clone)]
+pub enum Link {
+    /// No link, nothing in flight.
+    Idle,
+    /// `Cmd::Connect` sent for `code`; awaiting `Connected`/`Error`.
+    Connecting { code: &'static str },
+    /// A live link to `code` (INITIALISIERUNG ran and the ECU answered).
+    Connected { code: &'static str },
+    /// The last connect attempt resolved without a link; `reason` is user-facing. (The
+    /// failed module is whatever `ecu_sel` still points at — no need to duplicate it.)
+    Failed { reason: String },
+}
+
 pub struct App {
     pub theme: Theme,
     pub lang: Lang,
@@ -55,7 +71,6 @@ pub struct App {
     // ECU-select state
     pub ecu_cat: Option<Category>,          // active category filter (always Some once on screen 2)
     pub ecu_sel: Option<&'static str>,      // selected module code
-    pub connect_error: Option<String>,      // last connect failure → error popup on screen 2
 
     // Session (screen 3): the ECU's parsed .ipo screen tree + navigation.
     pub module: Option<std::rc::Rc<inpa::ScreenModule>>, // loaded .ipo for the current ECU
@@ -73,9 +88,7 @@ pub struct App {
     pub worker: Option<Worker>,
     pub status_msg: String,
     // Real connection / live data (screen 3, DDE via MW_SELECT_LESEN_NORM)
-    pub connected: Option<&'static str>,   // module code we've INITIALISIERUNG'd
-    pub connect_pending: bool,             // a Connect is in flight right now
-    pub connect_attempted: bool,           // tried once this session (no retry spam)
+    pub link: Link,                        // connection state machine (see `Link`)
     pub streaming: bool,                   // a StartStream is active
     pub live: Option<ediabas::JobResult>,  // latest polled measurement set
     pub stream_poll: Option<(Vec<(String, String)>, u64)>, // active per-page poll: (reqs, interval_ms)
@@ -120,7 +133,6 @@ impl App {
             query: String::new(),
             ecu_cat: Some(Category::Pwr),
             ecu_sel: None,
-            connect_error: None,
             module: None,
             module_for: None,
             nav: Vec::new(),
@@ -133,9 +145,7 @@ impl App {
             faults_tries: 0,
             worker: None,
             status_msg: String::new(),
-            connected: None,
-            connect_pending: false,
-            connect_attempted: false,
+            link: Link::Idle,
             streaming: false,
             live: None,
             stream_poll: None,
@@ -233,12 +243,177 @@ impl App {
         self.status_msg.clear();
     }
 
-    /// Reset the connection lifecycle (no link established yet).
+    /// Reset the connection lifecycle to `Idle` (no link, nothing in flight).
     fn reset_connection(&mut self) {
-        self.connected = None;
-        self.connect_pending = false;
-        self.connect_attempted = false;
-        self.connect_error = None;
+        self.link = Link::Idle;
+    }
+
+    /// The module code we currently hold a LIVE link to, if any.
+    pub fn connected_code(&self) -> Option<&'static str> {
+        match self.link {
+            Link::Connected { code } => Some(code),
+            _ => None,
+        }
+    }
+
+    /// True while a connect handshake is in flight (spinner shown).
+    pub fn is_connecting(&self) -> bool {
+        matches!(self.link, Link::Connecting { .. })
+    }
+
+    /// The user-facing failure reason when the last attempt failed (drives the modal).
+    pub fn link_failure(&self) -> Option<&str> {
+        match &self.link {
+            Link::Failed { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Drain ONE worker event into app state — the single place connection + session
+    /// events are handled (formerly split between `ecu_select::poll_connect` and
+    /// `session::drain_worker`).
+    pub fn apply_event(&mut self, evt: crate::worker::Event) {
+        use crate::worker::{Cmd, Event};
+        match evt {
+            Event::Connected { .. } => {
+                // A handshake completed → promote Connecting → Connected.
+                if let Link::Connecting { code } = self.link {
+                    self.link = Link::Connected { code };
+                }
+                self.status_msg.clear();
+            }
+            Event::PollMiss(_) => {
+                // Transient bus glitch: hold the last values AND the link. Only after
+                // several consecutive misses treat it as a real disconnect.
+                const MISS_LIMIT: u32 = 8;
+                self.comms_miss += 1;
+                if self.comms_miss >= MISS_LIMIT {
+                    if matches!(self.link, Link::Connected { .. }) {
+                        self.link = Link::Failed { reason: crate::i18n::t("err_no_response", self.lang) };
+                    }
+                    self.streaming = false;
+                    self.status_msg = crate::i18n::t("no_link", self.lang);
+                }
+            }
+            Event::JobDone { job, result } => {
+                self.comms_seq = self.comms_seq.wrapping_add(1); // a real exchange completed → pulse
+                self.comms_miss = 0; // link is live again
+                if job == "FS_LESEN" {
+                    self.faults = Some(result);
+                    self.faults_busy = false;
+                } else if job == "FS_LOESCHEN" {
+                    self.faults = None;
+                    self.faults_busy = true; // re-read after clearing; keep the busy state
+                    if let Some(w) = &self.worker {
+                        w.send(Cmd::RunJob { job: "FS_LESEN".into(), args: String::new() });
+                    }
+                } else {
+                    self.info_busy = false; // a TextInfo feeder read completed
+                    // Overlay onto the held set so a value missing this tick keeps its last
+                    // reading instead of blanking — steady display, no per-tick flicker.
+                    match &mut self.live {
+                        Some(cur) => cur.overlay(result),
+                        None => self.live = Some(result),
+                    }
+                }
+            }
+            Event::Error(e) => {
+                self.faults_busy = false;
+                self.info_busy = false;
+                match self.link {
+                    // A connect attempt failed → no link; show a clean reason.
+                    Link::Connecting { .. } => {
+                        self.link = Link::Failed { reason: humanize_connect_error(&e, self.lang) };
+                        self.streaming = false;
+                    }
+                    // A job failed mid-session (e.g. one FS_LESEN telegram) — keep the link,
+                    // just surface it. A truly dead bus is caught by the stream miss-counter.
+                    _ => {
+                        self.status_msg = format!("{}: {e}", crate::i18n::t("job_error", self.lang));
+                    }
+                }
+            }
+            Event::Disconnected => {
+                self.link = Link::Idle;
+                self.streaming = false;
+            }
+        }
+    }
+
+    /// Connection modal, rendered above every screen: a spinner while `Connecting`, or
+    /// the failure reason + Retry/Close while `Failed`. Nothing when `Idle`/`Connected`.
+    /// This is the single connect overlay (formerly `ecu_select::connect_modal` +
+    /// `session::connecting_modal`).
+    pub fn link_modal(&mut self, ctx: &egui::Context) {
+        let (connecting, failure) = (self.is_connecting(), self.link_failure().map(str::to_owned));
+        if !connecting && failure.is_none() {
+            return;
+        }
+        let c = theme::palette(self.theme);
+        let lang = self.lang;
+        let code = self.ecu_sel.unwrap_or("");
+        let screen = ctx.screen_rect();
+
+        // Dim, click-swallowing backdrop.
+        egui::Area::new(egui::Id::new("link_backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
+                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_black_alpha(170));
+            });
+
+        let frame = egui::Frame::none()
+            .fill(c.panel)
+            .stroke(egui::Stroke::new(1.0, c.stroke2))
+            .rounding(6.0)
+            .inner_margin(egui::Margin::symmetric(30.0, 26.0));
+
+        egui::Window::new("link_modal")
+            .title_bar(false)
+            .resizable(false)
+            .collapsible(false)
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .frame(frame)
+            .show(ctx, |ui| {
+                use egui::RichText;
+                ui.set_width(300.0);
+                ui.vertical_centered(|ui| match &failure {
+                    None => {
+                        ui.add(egui::Spinner::new().size(30.0).color(c.accent));
+                        ui.add_space(16.0);
+                        ui.label(RichText::new(crate::i18n::t("connecting", lang)).size(13.0).strong().color(c.fg));
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(format!("{code} · INITIALISIERUNG")).size(10.0).color(c.fg_dim));
+                    }
+                    Some(msg) => {
+                        ui.label(RichText::new("⚠").size(30.0).color(c.err));
+                        ui.add_space(12.0);
+                        ui.label(RichText::new(crate::i18n::t("connect_failed", lang)).size(13.0).strong().color(c.err));
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(msg).size(10.0).color(c.fg_dim));
+                        ui.add_space(20.0);
+                        ui.horizontal(|ui| {
+                            let retry = egui::Button::new(RichText::new(crate::i18n::t("retry", lang)).size(11.0).strong().color(c.accent_fg))
+                                .fill(c.accent).rounding(3.0).min_size(egui::Vec2::new(140.0, 32.0));
+                            if ui.add(retry).clicked() {
+                                self.start_connect(ctx);
+                            }
+                            ui.add_space(10.0);
+                            let close = egui::Button::new(RichText::new(crate::i18n::t("close", lang)).size(11.0).color(c.fg_dim))
+                                .fill(c.panel2).stroke(egui::Stroke::new(1.0, c.stroke)).rounding(3.0).min_size(egui::Vec2::new(140.0, 32.0));
+                            if ui.add(close).clicked() {
+                                self.link = Link::Idle;
+                            }
+                        });
+                    }
+                });
+            });
+
+        if connecting {
+            ctx.request_repaint(); // keep the spinner animating until the handshake resolves
+        }
     }
 
     /// CONNECT pressed on screen 2. Every module backed by a real SGBD (`.prg`)
@@ -261,7 +436,7 @@ impl App {
             // Any ECU with a screen script (.ipo) can open the session — its structure
             // renders even without a transport; the link (if any) comes up in the session.
             Some(m) if m.script.is_some() || m.prg.is_some() => self.screen = Screen::Session,
-            _ => self.connect_error = Some(crate::i18n::t("no_sgbd", self.lang)),
+            _ => self.link = Link::Failed { reason: crate::i18n::t("no_sgbd", self.lang) },
         }
     }
 
@@ -301,16 +476,47 @@ impl eframe::App for App {
         // Keep the clock / pulse animating.
         ctx.request_repaint_after(Duration::from_secs(1));
 
+        // Single worker-event drain for the whole app (connection + session events),
+        // BEFORE any screen renders, so every screen sees a consistent `link`.
+        let events = self.worker.as_ref().map(|w| w.poll()).unwrap_or_default();
+        for evt in events {
+            self.apply_event(evt);
+        }
+
         match self.screen {
             Screen::Chassis => screens::chassis_select::show(self, ctx),
             Screen::Ecu => screens::ecu_select::show(self, ctx),
             Screen::Session => crate::session::show(self, ctx),
         }
 
+        // The connect overlay (spinner / error) renders above every screen.
+        self.link_modal(ctx);
         // Settings popup renders above any screen; persist any change it (or the
         // header toggles) made this frame.
         screens::settings_modal(self, ctx);
         self.persist_if_changed();
     }
+}
+
+/// Turn a raw worker/transport error into a short, user-facing reason. The technical
+/// string (VM/IO detail) stays in the trace; the modal shows only this.
+fn humanize_connect_error(raw: &str, lang: Lang) -> String {
+    let low = raw.to_ascii_lowercase();
+    let key = if low.contains("timed out") || low.contains("timeout")
+        || low.contains("no response") || low.contains("не отвеч") || low.contains("did not answer")
+    {
+        "err_no_response"
+    } else if low.contains("denied") || low.contains("отказано")
+        || low.contains("in use") || low.contains("занят")
+    {
+        "err_port_busy"
+    } else if low.contains("not found") || low.contains("cannot find")
+        || low.contains("no such") || low.contains("не найд")
+    {
+        "err_no_adapter"
+    } else {
+        "err_generic"
+    };
+    crate::i18n::t(key, lang)
 }
 

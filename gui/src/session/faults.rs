@@ -13,7 +13,7 @@ use crate::theme::Colors;
 /// The whole fault page.
 pub(super) fn render(ui: &mut egui::Ui, c: &Colors, app: &App, act: &mut Option<Act>, lang: Lang) {
     // Auto-read on open (bounded retry — a first FS_LESEN after streaming can time out).
-    if app.connected.is_some() && app.faults_tries < 3 && app.faults.is_none() && !app.faults_busy {
+    if app.connected_code().is_some() && app.faults_tries < 3 && app.faults.is_none() && !app.faults_busy {
         *act = Some(Act::RunJob { job: "FS_LESEN".into(), arg: String::new() });
     }
     ui.label(

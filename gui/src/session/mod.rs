@@ -15,12 +15,12 @@ use std::rc::Rc;
 use egui::{Key, RichText};
 use inpa::model::{NavTarget, Row, ScreenKind, ScreenModule};
 
-use crate::app::{App, Screen};
+use crate::app::{App, Link, Screen};
 use crate::ecu::{mods_for, Module};
 use crate::i18n::{t, tr_prg};
 use crate::screens::header;
 use crate::theme::palette;
-use crate::worker::{Cmd, Event, Worker};
+use crate::worker::{Cmd, Worker};
 
 /// One navigation level: which menu drives the F-keys, and which screen (if any) is open.
 #[derive(Clone, Copy)]
@@ -66,37 +66,23 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         return;
     };
 
-    drain_worker(app);
     lifecycle(app, &m, &sm, ctx);
 
-    // Gate: a connectable ECU (real SGBD) must have a LIVE link before its session
-    // renders. While the handshake is in flight → loading modal only. If it finished
-    // WITHOUT a link → don't open a dead session: bounce back to ECU-select and show
-    // the reason there. ECUs without a transport (structure-only) skip the gate.
-    // Connectability follows the .ipo's own SGBD (what the connect actually opens),
-    // NOT the catalog `m.prg` mapping — so every ECU whose .ipo names an SGBD gets a
-    // real connect attempt (and its loading modal), and only a missing SGBD stays
-    // structure-only. `m` (bus/addr) is still used elsewhere.
+    // Gate: a connectable ECU (real SGBD) must hold a LIVE link before its session
+    // renders. While the handshake is in flight → blank backdrop only (the spinner is
+    // `App::link_modal`, drawn above every screen). If it resolved WITHOUT a link
+    // (Idle/Failed) → don't open a dead session: return to ECU-select, where the error
+    // modal shows. Structure-only ECUs (no SGBD in the .ipo) skip the gate entirely.
+    // Worker events (incl. the connect result) are drained once in `App::update`.
     let connectable = !sm.sgbd.is_empty() || !sm.group_files.is_empty();
-    if connectable && app.connected != Some(m.code) {
+    if connectable && app.connected_code() != Some(m.code) {
         header(app, ctx);
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(c.bg))
             .show(ctx, |_| {});
-        if app.connect_pending {
-            connecting_modal(app, ctx, m.code); // still handshaking — spinner
-        } else {
-            // Connect resolved with no link → surface the reason on ECU-select and
-            // return there; allow a fresh attempt.
-            if app.connect_error.is_none() {
-                let why = if app.status_msg.is_empty() {
-                    t("connect_failed", app.lang)
-                } else {
-                    app.status_msg.clone()
-                };
-                app.connect_error = Some(why);
-            }
-            app.connect_attempted = false;
+        if !app.is_connecting() {
+            // Not connecting and not connected → the attempt failed (or was never made);
+            // leave the dead session. Any failure reason already lives in `app.link`.
             app.screen = Screen::Ecu;
             ctx.request_repaint();
         }
@@ -179,54 +165,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     if let Some(a) = act.take() {
         apply(app, a);
     }
-}
-
-/// Full-screen "connecting…" overlay shown while `connect_pending`: a spinner over a
-/// dimmed, click-swallowing backdrop. Cleared automatically when the worker reports
-/// `Connected` (session fills) or `Error` (`status_msg` shows the reason).
-fn connecting_modal(app: &App, ctx: &egui::Context, code: &str) {
-    if !app.connect_pending {
-        return;
-    }
-    ctx.request_repaint(); // keep the spinner animating until the handshake resolves
-    let c = palette(app.theme);
-    let screen = ctx.screen_rect();
-
-    egui::Area::new(egui::Id::new("session_connect_backdrop"))
-        .order(egui::Order::Middle)
-        .fixed_pos(screen.min)
-        .show(ctx, |ui| {
-            let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
-            ui.painter().rect_filled(rect, 0.0, egui::Color32::from_black_alpha(170));
-        });
-
-    let frame = egui::Frame::none()
-        .fill(c.panel)
-        .stroke(egui::Stroke::new(1.0, c.stroke2))
-        .rounding(6.0)
-        .inner_margin(egui::Margin::symmetric(30.0, 26.0));
-
-    egui::Window::new("session_connect_modal")
-        .title_bar(false)
-        .resizable(false)
-        .collapsible(false)
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .frame(frame)
-        .show(ctx, |ui| {
-            ui.set_width(300.0);
-            ui.vertical_centered(|ui| {
-                ui.add(egui::Spinner::new().size(30.0).color(c.accent));
-                ui.add_space(16.0);
-                ui.label(RichText::new(t("connecting", app.lang)).size(13.0).strong().color(c.fg));
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(format!("{code} · INITIALISIERUNG / IDENT"))
-                        .size(10.0)
-                        .color(c.fg_dim),
-                );
-            });
-        });
 }
 
 /// Should a menu item be shown at all? Hides empty labels and INPA infrastructure items
@@ -381,72 +319,6 @@ fn load_ipo(script: &str) -> Option<ScreenModule> {
     inpa::parse(&path).ok()
 }
 
-/// Drain worker events into app state.
-fn drain_worker(app: &mut App) {
-    let Some(w) = &app.worker else { return };
-    for evt in w.poll() {
-        match evt {
-            Event::Connected { .. } => {
-                app.connected = app.ecu_sel;
-                app.connect_pending = false;
-                app.status_msg.clear();
-            }
-            Event::PollMiss(_) => {
-                // Transient bus glitch: keep the last drawn values AND the link. Only after
-                // several consecutive misses do we treat it as a real disconnect.
-                const MISS_LIMIT: u32 = 8;
-                app.comms_miss += 1;
-                if app.comms_miss >= MISS_LIMIT {
-                    app.connected = None; // update_poll then stops the stream and clears live
-                    app.streaming = false;
-                    app.status_msg = "нет связи".into();
-                }
-            }
-            Event::JobDone { job, result } => {
-                app.comms_seq = app.comms_seq.wrapping_add(1); // a real exchange completed → pulse
-                app.comms_miss = 0; // link is live again
-                if job == "FS_LESEN" {
-                    app.faults = Some(result);
-                    app.faults_busy = false;
-                } else if job == "FS_LOESCHEN" {
-                    app.faults = None;
-                    app.faults_busy = true; // re-read after clearing; keep the busy state
-                    if let Some(w) = &app.worker {
-                        w.send(Cmd::RunJob { job: "FS_LESEN".into(), args: String::new() });
-                    }
-                } else {
-                    app.info_busy = false; // a TextInfo feeder read completed
-                    // Overlay onto the held set so a value missing this tick keeps its last
-                    // reading instead of blanking — steady display, no per-tick flicker.
-                    match &mut app.live {
-                        Some(cur) => cur.overlay(result),
-                        None => app.live = Some(result),
-                    }
-                }
-            }
-            Event::Error(e) => {
-                app.faults_busy = false;
-                app.info_busy = false;
-                if app.connect_pending || app.connected.is_none() {
-                    // A connect attempt failed → no link.
-                    app.connected = None;
-                    app.connect_pending = false;
-                    app.streaming = false;
-                    app.status_msg = format!("нет связи: {e}");
-                } else {
-                    // A job failed mid-session (e.g. one FS_LESEN telegram) — keep the link,
-                    // just surface it. A truly dead bus is caught by the stream miss-counter.
-                    app.status_msg = format!("ошибка задания: {e}");
-                }
-            }
-            Event::Disconnected => {
-                app.connected = None;
-                app.streaming = false;
-            }
-        }
-    }
-}
-
 /// Establish the transport link once, using the PRG the `.ipo` named. Only ECUs with a
 /// real SGBD on a built transport (DDE/DS2 today) connect; the rest render structure-only.
 fn lifecycle(app: &mut App, m: &Module, sm: &ScreenModule, ctx: &egui::Context) {
@@ -455,7 +327,9 @@ fn lifecycle(app: &mut App, m: &Module, sm: &ScreenModule, ctx: &egui::Context) 
     // real connect attempt (and its loading modal), and only a missing SGBD stays
     // structure-only. `m` (bus/addr) is still used elsewhere.
     let connectable = !sm.sgbd.is_empty() || !sm.group_files.is_empty();
-    if connectable && app.connected != Some(m.code) && !app.connect_attempted {
+    // Send the ONE Cmd::Connect for this session while fresh (Idle). A Failed attempt
+    // does NOT auto-retry — the link modal's Retry re-arms it via `App::start_connect`.
+    if connectable && matches!(app.link, Link::Idle) {
         let prg = format!("{}.prg", sm.sgbd); // fallback SGBD from the .ipo
         // Port from settings (or first available if set to auto); fall back to COM3.
         let port = app.active_port().unwrap_or_else(|| "COM3".into());
@@ -465,14 +339,13 @@ fn lifecycle(app: &mut App, m: &Module, sm: &ScreenModule, ctx: &egui::Context) 
         let groups = sm.group_files.clone();
         let w = app.worker.get_or_insert_with(|| Worker::spawn(ctx.clone()));
         w.send(Cmd::Connect { port, baud: 9600, prg, groups });
-        app.connect_attempted = true;
-        app.connect_pending = true;
+        app.link = Link::Connecting { code: m.code };
     }
 }
 
 /// Start/stop/switch the live poll for the open data-stream screen.
 fn update_poll(app: &mut App, m: &Module, sm: &ScreenModule, view: &View) {
-    let desired = if app.connected == Some(m.code) {
+    let desired = if app.connected_code() == Some(m.code) {
         view.screen
             .and_then(|s| sm.as_screen(s))
             .filter(|s| s.kind == ScreenKind::DataStream)
@@ -504,7 +377,7 @@ fn update_poll(app: &mut App, m: &Module, sm: &ScreenModule, view: &View) {
 fn update_textinfo(app: &mut App, m: &Module, sm: &ScreenModule, view: &View) {
     let target = view
         .screen
-        .filter(|_| app.connected == Some(m.code))
+        .filter(|_| app.connected_code() == Some(m.code))
         .filter(|s| sm.as_screen(*s).map(|sc| sc.kind) == Some(ScreenKind::TextInfo));
     let Some(sid) = target else {
         app.info_for = None; // left the TextInfo screen — re-read on next open

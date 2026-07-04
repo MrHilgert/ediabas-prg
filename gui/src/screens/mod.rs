@@ -32,9 +32,9 @@ enum Link {
 }
 
 fn link_state(app: &App) -> Link {
-    if app.connect_pending {
+    if app.is_connecting() {
         Link::Pending
-    } else if app.connected.is_some() {
+    } else if app.connected_code().is_some() {
         if app.comms_miss > 0 {
             Link::Stall
         } else {

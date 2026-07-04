@@ -3,6 +3,20 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 use super::Driver;
 
+/// Map a `serialport` error into `Error::Io` PRESERVING its kind, so callers can tell a
+/// missing device (`NotFound`) from a busy/denied port (`PermissionDenied`) — the flat
+/// `ErrorKind::Other` used before erased that distinction.
+fn serial_io_err(e: serialport::Error) -> Error {
+    use serialport::ErrorKind as SK;
+    let kind = match e.kind() {
+        SK::NoDevice => std::io::ErrorKind::NotFound,
+        SK::InvalidInput => std::io::ErrorKind::InvalidInput,
+        SK::Io(k) => k,
+        SK::Unknown => std::io::ErrorKind::Other,
+    };
+    Error::Io(std::io::Error::new(kind, e))
+}
+
 pub struct SerialDriver {
     port: Box<dyn serialport::SerialPort>,
 }
@@ -20,12 +34,10 @@ impl SerialDriver {
             .flow_control(serialport::FlowControl::None)
             .timeout(Duration::from_millis(2000))
             .open()
-            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(serial_io_err)?;
         // Assert RTS and DTR — some K-line transceivers use these as enable signals.
-        port.write_request_to_send(true)
-            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-        port.write_data_terminal_ready(true)
-            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        port.write_request_to_send(true).map_err(serial_io_err)?;
+        port.write_data_terminal_ready(true).map_err(serial_io_err)?;
         Ok(Self { port })
     }
 }

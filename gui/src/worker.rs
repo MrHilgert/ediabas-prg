@@ -10,7 +10,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
-use ediabas::{JobResult, Measurement, Session};
+use ediabas::{Error, JobResult, Measurement, Session};
 
 /// UI → worker.
 pub enum Cmd {
@@ -38,7 +38,40 @@ pub enum Event {
     /// the last values and the link, dropping only after several consecutive misses.
     PollMiss(String),
     Error(String),
+    /// A CONNECT attempt failed, classified so the UI can tell "no adapter" (the serial
+    /// port / tty isn't there) from a real ECU timeout (port opened, module silent).
+    ConnectFailed(ConnectError),
     Disconnected,
+}
+
+/// Why a connect attempt failed. Distinguishes an adapter/port problem (nothing plugged
+/// in, wrong port, busy) from the ECU never answering on an open port.
+pub enum ConnectError {
+    /// Serial port / tty is unavailable — no adapter, wrong port, or it vanished.
+    NoPort,
+    /// Port exists but can't be opened (in use by another app, permission denied).
+    PortBusy,
+    /// Port opened fine, but the ECU never answered a real request (diagnostic timeout
+    /// or the module simply isn't on the bus).
+    NoResponse,
+    /// Anything else (unexpected I/O, parse error) — carries the raw detail for the log.
+    Other(String),
+}
+
+/// Classify a `Session::open` / `initialize` failure into a [`ConnectError`]. Port-open
+/// failures surface as `io::Error`; a bus timeout is `Error::Timeout`.
+fn classify_open(e: Error) -> ConnectError {
+    use std::io::ErrorKind;
+    match e {
+        Error::Io(io) => match io.kind() {
+            ErrorKind::PermissionDenied | ErrorKind::AddrInUse => ConnectError::PortBusy,
+            // NotFound / NotConnected / BrokenPipe / and most serialport open failures on a
+            // missing tty land here — treat as "no adapter / port unavailable".
+            _ => ConnectError::NoPort,
+        },
+        Error::Timeout => ConnectError::NoResponse,
+        other => ConnectError::Other(other.to_string()),
+    }
 }
 
 /// Handle held by the UI: send `Cmd`s, drain `Event`s (non-blocking).
@@ -97,7 +130,7 @@ fn run(cmd_rx: Receiver<Cmd>, evt_tx: Sender<Event>, ctx: egui::Context) {
                         }
                         Err(e) => {
                             session = None;
-                            let _ = evt_tx.send(Event::Error(e));
+                            let _ = evt_tx.send(Event::ConnectFailed(e));
                         }
                     }
                     ctx.request_repaint();
@@ -169,21 +202,22 @@ fn run_once(session: Option<&mut Session>, job: &str, args: &str) -> Event {
     }
 }
 
-fn connect(port: &str, baud: u32, prg: &str, groups: &[String]) -> Result<Session, String> {
+fn connect(port: &str, baud: u32, prg: &str, groups: &[String]) -> Result<Session, ConnectError> {
     // Phase 1 (INPA variant identification): if the .ipo referenced EDIABAS group
     // files, run each group's IDENTIFIKATION to learn the concrete variant SGBD;
     // otherwise fall back to `prg` (the .ipo's own SGBD).
     let target = resolve_variant(port, baud, groups, prg);
 
-    // Phase 2: open the concrete SGBD for the real session.
+    // Phase 2: open the concrete SGBD for the real session. `Session::open` /
+    // `initialize` fail with an I/O error when the port isn't there → NoPort/PortBusy.
     let prg_path = resolve_prg(&target);
-    let mut s = Session::open(port, baud, &prg_path).map_err(|e| e.to_string())?;
-    s.initialize().map_err(|e| e.to_string())?;
+    let mut s = Session::open(port, baud, &prg_path).map_err(classify_open)?;
+    s.initialize().map_err(classify_open)?;
     // DS2 INITIALISIERUNG only configures comm parameters locally (xsetpar/xawlen)
     // — it never sends a telegram, so it "succeeds" even with nothing on the bus.
-    // Prove the ECU is actually there by running a real identification job: it
-    // sends a request and a transport timeout ⇒ module absent / no link.
-    probe_presence(&mut s)?;
+    // Prove the ECU is actually there by running a real identification job: it sends a
+    // request, and a transport timeout here (port is open) ⇒ module absent / no answer.
+    s.probe_presence().map_err(|_| ConnectError::NoResponse)?;
     Ok(s)
 }
 
@@ -212,16 +246,6 @@ fn resolve_variant(port: &str, baud: u32, groups: &[String], fallback_prg: &str)
     fallback_prg.to_string()
 }
 
-/// Liveness probe (delegates to [`Session::probe_presence`]): the library runs the
-/// ECU's identification job and requires a REAL bus answer from its own wake address,
-/// so an absent module can't fake-connect on `JOB_STATUS=OKAY` or another module's
-/// reply. Any failure is surfaced as a single Russian message (proper localized error
-/// codes land in a later phase).
-fn probe_presence(s: &mut Session) -> Result<(), String> {
-    s.probe_presence()
-        .map_err(|_| "ЭБУ не отвечает (нет ответа с шины)".to_string())
-}
-
 /// Locate `ecu/<name>` regardless of the current working directory and filename
 /// case: walks up from cwd and the exe dir (dev builds live under `target/…`, with
 /// `ecu/` at the workspace root) and matches the filename case-insensitively, so
@@ -230,4 +254,23 @@ fn probe_presence(s: &mut Session) -> Result<(), String> {
 /// path so `Session::open` still reports a clear error when the file is truly absent.
 fn resolve_prg(name: &str) -> PathBuf {
     crate::i18n::resolve_ci("ecu", name).unwrap_or_else(|| Path::new("ecu").join(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error as IoError, ErrorKind};
+
+    #[test]
+    fn classify_open_splits_port_from_ecu() {
+        // Missing/unavailable adapter → NoPort.
+        assert!(matches!(classify_open(Error::Io(IoError::from(ErrorKind::NotFound))), ConnectError::NoPort));
+        // Busy / access-denied port → PortBusy.
+        assert!(matches!(classify_open(Error::Io(IoError::from(ErrorKind::PermissionDenied))), ConnectError::PortBusy));
+        assert!(matches!(classify_open(Error::Io(IoError::from(ErrorKind::AddrInUse))), ConnectError::PortBusy));
+        // Real ECU timeout (port opened, no answer) → NoResponse.
+        assert!(matches!(classify_open(Error::Timeout), ConnectError::NoResponse));
+        // Anything else → Other.
+        assert!(matches!(classify_open(Error::Vm("x".into())), ConnectError::Other(_)));
+    }
 }

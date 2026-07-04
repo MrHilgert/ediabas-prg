@@ -273,7 +273,7 @@ impl App {
     /// events are handled (formerly split between `ecu_select::poll_connect` and
     /// `session::drain_worker`).
     pub fn apply_event(&mut self, evt: crate::worker::Event) {
-        use crate::worker::{Cmd, Event};
+        use crate::worker::{Cmd, ConnectError, Event};
         match evt {
             Event::Connected { .. } => {
                 // A handshake completed → promote Connecting → Connected.
@@ -317,21 +317,26 @@ impl App {
                     }
                 }
             }
-            Event::Error(e) => {
+            Event::ConnectFailed(kind) => {
+                // A connect attempt failed → no link. Map the classified cause to a
+                // localized reason so "no adapter" reads differently from an ECU timeout.
                 self.faults_busy = false;
                 self.info_busy = false;
-                match self.link {
-                    // A connect attempt failed → no link; show a clean reason.
-                    Link::Connecting { .. } => {
-                        self.link = Link::Failed { reason: humanize_connect_error(&e, self.lang) };
-                        self.streaming = false;
-                    }
-                    // A job failed mid-session (e.g. one FS_LESEN telegram) — keep the link,
-                    // just surface it. A truly dead bus is caught by the stream miss-counter.
-                    _ => {
-                        self.status_msg = format!("{}: {e}", crate::i18n::t("job_error", self.lang));
-                    }
-                }
+                self.streaming = false;
+                let key = match kind {
+                    ConnectError::NoPort => "err_no_adapter",
+                    ConnectError::PortBusy => "err_port_busy",
+                    ConnectError::NoResponse => "err_no_response",
+                    ConnectError::Other(_) => "err_generic",
+                };
+                self.link = Link::Failed { reason: crate::i18n::t(key, self.lang) };
+            }
+            Event::Error(e) => {
+                // A job failed mid-session (e.g. one FS_LESEN telegram) — keep the link,
+                // just surface it. A truly dead bus is caught by the stream miss-counter.
+                self.faults_busy = false;
+                self.info_busy = false;
+                self.status_msg = format!("{}: {e}", crate::i18n::t("job_error", self.lang));
             }
             Event::Disconnected => {
                 self.link = Link::Idle;
@@ -498,25 +503,4 @@ impl eframe::App for App {
     }
 }
 
-/// Turn a raw worker/transport error into a short, user-facing reason. The technical
-/// string (VM/IO detail) stays in the trace; the modal shows only this.
-fn humanize_connect_error(raw: &str, lang: Lang) -> String {
-    let low = raw.to_ascii_lowercase();
-    let key = if low.contains("timed out") || low.contains("timeout")
-        || low.contains("no response") || low.contains("не отвеч") || low.contains("did not answer")
-    {
-        "err_no_response"
-    } else if low.contains("denied") || low.contains("отказано")
-        || low.contains("in use") || low.contains("занят")
-    {
-        "err_port_busy"
-    } else if low.contains("not found") || low.contains("cannot find")
-        || low.contains("no such") || low.contains("не найд")
-    {
-        "err_no_adapter"
-    } else {
-        "err_generic"
-    };
-    crate::i18n::t(key, lang)
-}
 

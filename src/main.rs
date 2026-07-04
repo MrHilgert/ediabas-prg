@@ -239,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         });
                     }
 
-                    let mut vm = vm::Vm::new(Box::new(ds2), tables);
+                    let mut vm = vm::Vm::new(Box::new(ds2), tables, ediabas::config::CommConfig::default());
                     vm.set_args(arg_buf.clone());
 
                     // Run the init job to configure the protocol (len_offset/len_add/
@@ -300,7 +300,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 None => {
-                    let mut vm = vm::Vm::new(Box::new(transport::sim::NullTransport), tables);
+                    let mut vm = vm::Vm::new(Box::new(transport::sim::NullTransport), tables, ediabas::config::CommConfig::default());
                     vm.set_args(arg_buf.clone());
                     vm.run_job(&code).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
                 }

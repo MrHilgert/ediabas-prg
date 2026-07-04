@@ -37,7 +37,7 @@ use crate::transport::Transport;
 use crate::prg::Table;
 use crate::trace::{trace, vtrace};
 
-mod decode;
+pub(crate) mod decode;
 mod value;
 
 pub use value::Value;
@@ -88,7 +88,13 @@ pub struct Vm {
 }
 
 impl Vm {
-    pub fn new(transport: Box<dyn Transport>, tables: HashMap<String, Table>) -> Self {
+    /// Create a VM over `transport`, seeded with the ECU's static [`CommConfig`] (the
+    /// concept/baud/len-layout/wake-addr probed from `INITIALISIERUNG`). Seeding —
+    /// rather than starting from `CommConfig::default()` — means an ECU whose
+    /// `INITIALISIERUNG` has no `xawlen` keeps its concept-derived `len_offset` instead
+    /// of `xsetpar` clobbering it back to the DS2 default; ECUs that DO run `xawlen`
+    /// are unaffected (it stays authoritative for the answer length).
+    pub fn new(transport: Box<dyn Transport>, tables: HashMap<String, Table>, cfg: CommConfig) -> Self {
         Self {
             regs: HashMap::new(),
             stack: Vec::new(),
@@ -98,7 +104,7 @@ impl Vm {
             found_row: None,
             flags: Flags::default(),
             call_stack: Vec::new(),
-            comm_cfg: CommConfig::default(),
+            comm_cfg: cfg,
             awlen_set: false,
             args: Vec::new(),
             got_response: false,

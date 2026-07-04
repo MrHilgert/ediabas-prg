@@ -45,6 +45,12 @@ impl Session {
         if cfg.baud == 0 {
             cfg.baud = baud;
         }
+        if !crate::config::Protocol::is_recognized(cfg.concept) {
+            trace!(
+                "[open] ECU declares unrecognized concept {:#06x} — using DS2 framing as best effort",
+                cfg.concept
+            );
+        }
 
         // K-line families open the serial at the concept's baud/parity. D-CAN reaches
         // the CAN bus through the adapter's own control link (the D-CAN transport sets
@@ -57,7 +63,7 @@ impl Session {
         let serial = SerialDriver::open_parity(port, serial_baud, parity)?;
 
         let transport = crate::transport::build(Box::new(serial), &cfg);
-        let vm = Vm::new(transport, tables);
+        let vm = Vm::new(transport, tables, cfg);
         Ok(Session { prg, vm })
     }
 

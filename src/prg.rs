@@ -454,23 +454,57 @@ impl PrgFile {
     /// The `INITIALISIERUNG` job configures the transport by executing `xsetpar`
     /// with an 18-byte CommParameter block. That block carries the concept
     /// (0x0006 DS2, 0x0110 D-CAN, 0x010F BMW-FAST, …), baud and timeouts — so we
-    /// can pick the right transport before ever touching the bus. We scan the
-    /// (already XOR-decoded) INITIALISIERUNG bytecode for the first
-    /// `xsetpar` opcode (`28 80 <len_lo> <len_hi> <payload>`) and parse its payload.
+    /// can pick the right transport before ever touching the bus.
     ///
-    /// Returns `None` if there is no INITIALISIERUNG job or no `xsetpar` in it
-    /// (caller should then fall back to the DS2 default).
+    /// We locate the CommParameter by **walking real instruction boundaries** of the
+    /// (XOR-decoded) INITIALISIERUNG bytecode (via [`skip_instr`]) and taking the
+    /// immediate-string operand of the first `xsetpar` (opcode `0x28`, ImmStr mode).
+    /// Walking instructions — rather than scanning for the raw `28 80` byte pair —
+    /// prevents a `28 80` that is actually OPERAND DATA of some other instruction from
+    /// masquerading as `xsetpar`. A raw signature scan is kept only as a fallback for
+    /// the rare job whose instruction walk desyncs before reaching `xsetpar`, so
+    /// coverage never regresses versus the old behaviour.
+    ///
+    /// Returns `None` if there is no INITIALISIERUNG job or no parseable CommParameter.
     pub fn initial_comm_config(&self) -> Option<crate::config::CommConfig> {
         let code = self.job_code("INITIALISIERUNG")?;
+        Self::walk_first_xsetpar(&code)
+            .or_else(|| Self::scan_first_xsetpar(&code))
+            .and_then(|param| crate::config::CommConfig::parse(&param))
+    }
+
+    /// Instruction-accurate search for the first `xsetpar` CommParameter block.
+    /// Returns the raw (≥18-byte) ImmStr payload, or `None` if not found on the path.
+    fn walk_first_xsetpar(code: &[u8]) -> Option<Vec<u8>> {
+        let mut ip = 0usize;
+        while ip + 2 <= code.len() {
+            // xsetpar (0x28) with an immediate-string operand: MODE hi-nibble == 8.
+            if code[ip] == 0x28 && (code[ip + 1] >> 4) == 8 {
+                let pos = ip + 2; // ImmStr operand: [n_lo][n_hi][n bytes]
+                if pos + 1 < code.len() {
+                    let n = code[pos] as usize | ((code[pos + 1] as usize) << 8);
+                    let start = pos + 2;
+                    if n >= 18 && start + n <= code.len() {
+                        return Some(code[start..start + n].to_vec());
+                    }
+                }
+            }
+            let next = crate::vm::decode::skip_instr(code, ip);
+            if next <= ip { break; } // never stall / move backwards
+            ip = next;
+        }
+        None
+    }
+
+    /// Fallback: raw byte-signature scan for `28 80 <n_lo> <n_hi> <payload>` (the
+    /// pre-decoder behaviour), used only when the instruction walk finds nothing.
+    fn scan_first_xsetpar(code: &[u8]) -> Option<Vec<u8>> {
         let mut ip = 0usize;
         while ip + 4 <= code.len() {
-            // xsetpar: 28 80 <n_lo> <n_hi> <n bytes CommParameter>
             if code[ip] == 0x28 && code[ip + 1] == 0x80 {
                 let n = (code[ip + 2] as usize) | ((code[ip + 3] as usize) << 8);
                 if n >= 18 && ip + 4 + n <= code.len() {
-                    if let Some(cfg) = crate::config::CommConfig::parse(&code[ip + 4..ip + 4 + n]) {
-                        return Some(cfg);
-                    }
+                    return Some(code[ip + 4..ip + 4 + n].to_vec());
                 }
             }
             ip += 1;
@@ -478,3 +512,4 @@ impl PrgFile {
         None
     }
 }
+

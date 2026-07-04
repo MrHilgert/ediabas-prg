@@ -28,6 +28,17 @@ impl Protocol {
     pub fn is_can(self) -> bool {
         matches!(self, Protocol::DCan)
     }
+
+    /// Whether `concept` maps to a concretely-implemented transport, as opposed to the
+    /// DS2 best-effort fallback [`from_concept`] applies to any unknown code. Callers
+    /// use this to warn (rather than silently guess) when an ECU declares a concept we
+    /// don't specifically support.
+    pub fn is_recognized(concept: u16) -> bool {
+        matches!(
+            concept,
+            0x0001 | 0x0005 | 0x0006 | 0x0002 | 0x0003 | 0x010C | 0x010D | 0x010F | 0x0110
+        )
+    }
 }
 
 /// Full set of EDIABAS CommParameter values derived from xconnect / INITIALISIERUNG.
@@ -123,6 +134,15 @@ impl CommConfig {
         // The concept's low 16 bits sit at byte 0 in BOTH element encodings, so we can
         // read it before deciding the element width.
         let concept = u16::from_le_bytes([p[0], p[1]]);
+        // Sanity: a 32-bit-concept block is much longer than an 18-byte u16 block (a
+        // 0x010C block is ~136 bytes). A >=0x0100 concept in a stub-length block means
+        // the width guess below is on thin ice — log it, then still parse best-effort.
+        if concept >= 0x0100 && p.len() < 24 {
+            crate::trace::trace!(
+                "[CommConfig] concept {concept:#06x} but block is only {} bytes — u32 element width is suspect",
+                p.len()
+            );
+        }
         // EDIABAS's classic concepts (< 0x0100: DS2, KWP1281) store CommParameter as
         // little-endian u16 elements; the 32-bit concepts (>= 0x0100: KWP2000-BMW,
         // BMW-FAST, D-CAN) store them as u32 elements. Verified on the corpus:
@@ -240,7 +260,11 @@ impl Default for CommConfig {
             timeout_std_ms: 2000,
             regen_time_ms:  20,
             timeout_tel_ms: 50,
-            interbyte_ms:   5,
+            // A clean CommConfig carries NO forced inter-byte spacing — that is a
+            // property of a specific transport+adapter, not of the protocol. The DS2
+            // transport re-imposes its KDCAN floor (`DS2_MIN_INTERBYTE_MS`) in
+            // `configure()`, so this 0 never reaches a DS2 wire unclamped.
+            interbyte_ms:   0,
             wake_addr:      None,
             retry_nr78:     3,
             timeout_nr78_ms: 3000,

@@ -73,6 +73,11 @@ pub struct Vm {
     flags: Flags,
     call_stack: Vec<usize>,
     comm_cfg: CommConfig,
+    /// Set once `xawlen` (CommAnswerLen) has defined the answer-length format. After
+    /// that a later `xsetpar` must NOT re-derive len_offset/len_add from its concept
+    /// (some clusters, e.g. IKI, place xsetpar after xawlen and would otherwise reset
+    /// the old-format LEN@1 back to the 4-byte LEN@3 and mis-parse every response).
+    awlen_set: bool,
     /// Job argument buffer (EDIABAS ArgString), read via par*/pary opcodes.
     args: Vec<u8>,
 }
@@ -89,6 +94,7 @@ impl Vm {
             flags: Flags::default(),
             call_stack: Vec::new(),
             comm_cfg: CommConfig::default(),
+            awlen_set: false,
             args: Vec::new(),
         }
     }
@@ -1515,7 +1521,16 @@ impl Vm {
                     let n = (*nn_lo as usize) | ((*nn_hi as usize) << 8);
                     if n >= 18 && ip + 4 + n <= code.len() {
                         if let Some(cfg) = CommConfig::parse(&code[ip + 4..ip + 4 + n]) {
-                            self.comm_cfg = cfg;
+                            if self.awlen_set {
+                                // xawlen already fixed the answer-length format — keep it.
+                                // xsetpar only refreshes protocol/baud/timeouts/interbyte.
+                                let (lo, la) = (self.comm_cfg.len_offset, self.comm_cfg.len_add);
+                                self.comm_cfg = cfg;
+                                self.comm_cfg.len_offset = lo;
+                                self.comm_cfg.len_add = la;
+                            } else {
+                                self.comm_cfg = cfg;
+                            }
                         }
                         trace!("[xsetpar] concept={:?} baud={} len_offset={} interbyte_ms={} (from .prg)",
                             self.comm_cfg.protocol, self.comm_cfg.baud, self.comm_cfg.len_offset,
@@ -1534,6 +1549,7 @@ impl Vm {
                         let p = &code[ip + 4..ip + 4 + n];
                         self.comm_cfg.len_offset = (-(p[0] as i8)) as usize;
                         self.comm_cfg.len_add    = p[2] as usize;
+                        self.awlen_set = true; // authoritative from now on; xsetpar won't reset it
                         trace!("[xawlen] len_offset={} len_add={}",
                             self.comm_cfg.len_offset, self.comm_cfg.len_add);
                         if let Err(e) = self.transport.configure(&self.comm_cfg) {

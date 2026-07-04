@@ -137,6 +137,15 @@ impl Vm {
         self.comm_cfg.wake_addr
     }
 
+    /// Diagnostic addresses that actually answered during the last job (sorted). For
+    /// presence diagnostics: compare against `wake_addr` to see whether the ECU replied
+    /// from a different address than the static CommParameter expected.
+    pub fn responders(&self) -> Vec<u8> {
+        let mut v: Vec<u8> = self.responders.iter().copied().collect();
+        v.sort_unstable();
+        v
+    }
+
     /// Time of the most recent real bus answer (across all jobs), for liveness checks.
     pub fn last_response_at(&self) -> Option<Instant> {
         self.last_ok

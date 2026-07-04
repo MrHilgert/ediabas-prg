@@ -169,6 +169,16 @@ impl Session {
         };
         let r = self.run_job(job, "")?;
         if !r.comm_ok() {
+            // Diagnostic (trace-only): show whether the ECU answered at all and from which
+            // address vs the CommParameter wake_addr. A non-empty `responders` that does
+            // NOT contain `wake_addr` means the module DID reply, just from a different
+            // diagnostic address than the static wake_addr expects → presence mis-gates.
+            trace!(
+                "[presence] '{job}' comm_ok=false — wake_addr={:?} responders={:02X?} status={:?}",
+                self.vm.wake_addr(),
+                self.vm.responders(),
+                r.job_status()
+            );
             return Err(Error::Vm("ECU did not answer on the bus".into()));
         }
         let ok = r

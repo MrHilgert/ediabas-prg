@@ -13,6 +13,7 @@ use std::path::Path;
 use crate::driver::serial::SerialDriver;
 use crate::error::{Error, Result};
 use crate::prg::PrgFile;
+use crate::trace::trace;
 use crate::vm::Vm;
 
 /// A live diagnostic session against one ECU over a serial K-line adapter.
@@ -35,6 +36,7 @@ impl Session {
     ///
     /// This does not talk to the ECU yet — call [`Session::initialize`] next.
     pub fn open(port: &str, baud: u32, prg_path: impl AsRef<Path>) -> Result<Self> {
+        trace!("═══ OPEN {} @ {port} ═══", prg_path.as_ref().display());
         let prg = PrgFile::open(prg_path.as_ref()).map_err(|e| Error::Prg(e.to_string()))?;
         let tables = prg.parse_tables();
 
@@ -81,6 +83,7 @@ impl Session {
     }
 
     fn exec(&mut self, job: &str, args: &[u8]) -> Result<JobResult> {
+        trace!("── JOB {job} ──");
         let code = self
             .prg
             .job_code(job)

@@ -1451,7 +1451,14 @@ impl Vm {
                     }
                     let telegram = &code[ip + 5..ip + 5 + n];
                     let response = self.transport.exchange(telegram)
-                        .map_err(|e| format!("xsend failed: {e}"))?;
+                        .unwrap_or_else(|e| {
+                            // A comm timeout is NOT fatal: EDIABAS jobs (esp. group
+                            // IDENTIFIKATION) probe several addresses and branch on an
+                            // empty response. Return empty and let the bytecode decide,
+                            // instead of aborting the whole job with a hard error.
+                            trace!("[xsend] comm timeout (non-fatal): {e}");
+                            Vec::new()
+                        });
                     self.regs.insert(*dst_reg, Value::Data(response));
                     ip += 5 + n;
                 }
@@ -1462,7 +1469,14 @@ impl Vm {
                     trace!("XSEND telegram ({} bytes): {}", data.len(),
                         data.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "));
                     let response = self.transport.exchange(&data)
-                        .map_err(|e| format!("xsend failed: {e}"))?;
+                        .unwrap_or_else(|e| {
+                            // A comm timeout is NOT fatal: EDIABAS jobs (esp. group
+                            // IDENTIFIKATION) probe several addresses and branch on an
+                            // empty response. Return empty and let the bytecode decide,
+                            // instead of aborting the whole job with a hard error.
+                            trace!("[xsend] comm timeout (non-fatal): {e}");
+                            Vec::new()
+                        });
                     trace!("XSEND response ({} bytes): {}", response.len(),
                         response.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "));
                     self.regs.insert(*dst, Value::Data(response));
@@ -1473,7 +1487,14 @@ impl Vm {
                 [0x2a, 0x14, dst, src, ..] => {
                     let data = self.reg_bytes(src);
                     let response = self.transport.exchange(&data)
-                        .map_err(|e| format!("xsend failed: {e}"))?;
+                        .unwrap_or_else(|e| {
+                            // A comm timeout is NOT fatal: EDIABAS jobs (esp. group
+                            // IDENTIFIKATION) probe several addresses and branch on an
+                            // empty response. Return empty and let the bytecode decide,
+                            // instead of aborting the whole job with a hard error.
+                            trace!("[xsend] comm timeout (non-fatal): {e}");
+                            Vec::new()
+                        });
                     self.regs.insert(*dst, Value::Data(response));
                     ip += 4;
                 }

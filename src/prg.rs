@@ -449,6 +449,22 @@ impl PrgFile {
         Some(xor_decode(code_raw.get(start..end)?))
     }
 
+    /// Name of this SGBD's identification job — used both for presence probes and for
+    /// group→variant resolution. BMW SGBDs name it `IDENTIFIKATION`; `IDENT`/`INFO` are
+    /// accepted as fallbacks for the odd variant. `None` if the `.prg` defines none.
+    pub fn ident_job(&self) -> Option<&'static str> {
+        ["IDENTIFIKATION", "IDENT", "INFO"]
+            .into_iter()
+            .find(|&j| self.job_code(j).is_some())
+    }
+
+    /// Result name an identification job reports the concrete variant under. BMW group
+    /// files use `VARIANTE`; kept as a method so a future data-driven SGBD can override
+    /// it without touching call sites.
+    pub fn variant_result(&self) -> &'static str {
+        "VARIANTE"
+    }
+
     /// Statically determine the ECU's communication concept WITHOUT any I/O.
     ///
     /// The `INITIALISIERUNG` job configures the transport by executing `xsetpar`

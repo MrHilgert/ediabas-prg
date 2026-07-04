@@ -96,7 +96,14 @@ impl Session {
             .ok_or_else(|| Error::Vm(format!("job '{job}' not found in .prg")))?;
         self.vm.set_args(args.to_vec());
         let sets = self.vm.run_job(&code).map_err(Error::Vm)?;
-        let comm_ok = self.vm.got_response();
+        // Presence gates on the ECU's OWN wake address answering, not merely "something
+        // on the bus answered": a group IDENTIFIKATION probes several addresses, and a
+        // reply from a different module must not count as this ECU being present. If the
+        // CommParameter declared no wake address, fall back to "any address answered".
+        let comm_ok = match self.vm.wake_addr() {
+            Some(addr) => self.vm.responded_from(addr),
+            None => self.vm.got_response(),
+        };
         Ok(JobResult::new(
             sets.into_iter().map(ResultSet::from_map).collect(),
         )
@@ -136,14 +143,59 @@ impl Session {
     ///
     /// Runs a real telegram, so [`Session::initialize`] must have succeeded first.
     pub fn identify_variant(&mut self) -> Result<Option<String>> {
-        let Some(job) = ["IDENTIFIKATION", "IDENT"].into_iter().find(|&j| self.has_job(j))
-        else {
+        let Some(job) = self.prg.ident_job() else {
             return Ok(None);
         };
+        let variant_field = self.prg.variant_result();
         let res = self.run_job(job, "")?;
         Ok(res
-            .get_str("VARIANTE")
+            .get_str(variant_field)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()))
+    }
+
+    /// Liveness/presence probe: run the ECU's identification job and require a REAL bus
+    /// answer — not merely `JOB_STATUS=OKAY`, which a job can report after every
+    /// telegram timed out (comm errors are non-fatal so multi-address ident jobs can
+    /// branch). `Ok(())` only when a telegram round-trip actually reached this ECU.
+    /// If the `.prg` has no identification job there is nothing cheap to probe with, so
+    /// the caller's successful `initialize` is accepted (`Ok(())`).
+    ///
+    /// Callers that localize errors should treat any `Err` as "not present" rather than
+    /// parsing the message text.
+    pub fn probe_presence(&mut self) -> Result<()> {
+        let Some(job) = self.prg.ident_job() else {
+            return Ok(());
+        };
+        let r = self.run_job(job, "")?;
+        if !r.comm_ok() {
+            return Err(Error::Vm("ECU did not answer on the bus".into()));
+        }
+        let ok = r
+            .job_status()
+            .map(|st| st.to_ascii_uppercase().contains("OKAY"))
+            .unwrap_or_else(|| !r.is_empty());
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::Vm(format!(
+                "ECU answered but job status is {}",
+                r.job_status().unwrap_or_else(|| "unknown".into())
+            )))
+        }
+    }
+
+    /// Whether the ECU produced a real bus answer within `within` (time-based liveness).
+    /// Unlike a per-job flag, this survives across polls, so a GUI can distinguish a
+    /// still-connected ECU from one that went silent mid-stream.
+    pub fn link_alive(&self, within: std::time::Duration) -> bool {
+        self.vm
+            .last_response_at()
+            .is_some_and(|t| t.elapsed() <= within)
+    }
+
+    /// Wall-clock instant of the most recent real bus answer, if any.
+    pub fn last_response_at(&self) -> Option<std::time::Instant> {
+        self.vm.last_response_at()
     }
 }

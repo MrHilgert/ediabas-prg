@@ -36,9 +36,12 @@ impl JobResult {
         &self.sets
     }
 
-    /// Append another result's sets (used to merge several polled jobs into one view).
+    /// Append another result's sets — merges several jobs polled in ONE tick into a
+    /// single view. `comm_ok` ORs within that tick: if any of the merged jobs reached
+    /// the ECU, the tick saw a live link. This is a one-shot merge, not a streaming
+    /// accumulator, so it does not make liveness "stick" across ticks (see `overlay`).
     pub fn extend(&mut self, other: JobResult) {
-        self.comm_ok |= other.comm_ok; // any real response counts as a live link
+        self.comm_ok |= other.comm_ok;
         self.sets.extend(other.sets);
     }
 
@@ -46,7 +49,11 @@ impl JobResult {
     /// a single set. Used to hold last-known values across streaming polls: a name missing
     /// from `other` keeps its previous value, and repeated polls don't grow the set list.
     pub fn overlay(&mut self, other: JobResult) {
-        self.comm_ok |= other.comm_ok;
+        // Liveness follows the NEWEST tick, it does not accumulate: once the ECU goes
+        // silent, the next overlay carries `comm_ok=false` and this view reflects the
+        // drop. A sticky `|=` here would report a live link forever after the first
+        // answer — hiding a mid-stream disconnect.
+        self.comm_ok = other.comm_ok;
         let mut flat: HashMap<String, Value> = HashMap::new();
         for set in self.sets.drain(..) {
             flat.extend(set.map);

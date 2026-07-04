@@ -212,42 +212,14 @@ fn resolve_variant(port: &str, baud: u32, groups: &[String], fallback_prg: &str)
     fallback_prg.to_string()
 }
 
-/// Liveness probe: run the first available identification job and require the ECU
-/// to answer for real. `Ok(())` only if a telegram round-trip actually succeeded;
-/// a timeout (no response) or an error status means the module isn't there.
+/// Liveness probe (delegates to [`Session::probe_presence`]): the library runs the
+/// ECU's identification job and requires a REAL bus answer from its own wake address,
+/// so an absent module can't fake-connect on `JOB_STATUS=OKAY` or another module's
+/// reply. Any failure is surfaced as a single Russian message (proper localized error
+/// codes land in a later phase).
 fn probe_presence(s: &mut Session) -> Result<(), String> {
-    // Standard BMW SGBD identification jobs, in preference order.
-    let job = ["IDENT", "IDENTIFIKATION", "INFO"]
-        .into_iter()
-        .find(|&j| s.has_job(j));
-    let Some(job) = job else {
-        // No known ident job to probe with — can't cheaply verify; accept the init.
-        return Ok(());
-    };
-    match s.run_job(job, "") {
-        Ok(r) => {
-            // A job can set JOB_STATUS=OKAY even when every telegram timed out (comm
-            // errors are non-fatal so multi-address ident jobs can branch). So presence
-            // is gated on a REAL bus response first — otherwise absent modules would
-            // fake-connect. Only then trust JOB_STATUS / returned data.
-            if !r.comm_ok() {
-                return Err("ЭБУ не отвечает (нет ответа с шины)".into());
-            }
-            let ok = r
-                .job_status()
-                .map(|st| st.to_ascii_uppercase().contains("OKAY"))
-                .unwrap_or_else(|| !r.is_empty());
-            if ok {
-                Ok(())
-            } else {
-                Err(format!(
-                    "ЭБУ ответил, но статус: {}",
-                    r.job_status().unwrap_or_else(|| "нет данных".into())
-                ))
-            }
-        }
-        Err(e) => Err(format!("ЭБУ не отвечает: {e}")),
-    }
+    s.probe_presence()
+        .map_err(|_| "ЭБУ не отвечает (нет ответа с шины)".to_string())
 }
 
 /// Locate `ecu/<name>` regardless of the current working directory and filename

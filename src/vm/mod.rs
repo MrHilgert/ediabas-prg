@@ -31,8 +31,9 @@
 //   a8 ppopy  a9 pjtsr  aa tabsetex ab ufix2dez ac generr ad ticks ae waitex af xopen
 //   b0 xclose b1 xcloseex b2 xswitch b3 xsendex b4 xrecvex b5 ssize b6 tabcols b7 tabrows
 
-use std::collections::HashMap;
-use crate::config::CommConfig;
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+use crate::config::{CommConfig, Protocol};
 use crate::transport::Transport;
 use crate::prg::Table;
 use crate::trace::{trace, vtrace};
@@ -80,11 +81,16 @@ pub struct Vm {
     awlen_set: bool,
     /// Job argument buffer (EDIABAS ArgString), read via par*/pary opcodes.
     args: Vec<u8>,
-    /// Set true once any `xsend` in the current job got a REAL (non-empty) bus
-    /// response. Distinguishes "ECU actually answered" from a job that reports
-    /// `JOB_STATUS=OKAY` after every send timed out (which must NOT count as a live
-    /// connection — otherwise a probe fake-connects to absent modules).
-    got_response: bool,
+    /// Diagnostic addresses that returned a REAL (non-empty) answer during the current
+    /// job — the target byte of each `xsend` that got a reply. Presence gates on the
+    /// SPECIFIC address (`responded_from(wake_addr)`), so a group IDENTIFIKATION that
+    /// probes several addresses can't count a stray reply from a different module as
+    /// "this ECU is present". Reset at the start of every `run_job`.
+    responders: HashSet<u8>,
+    /// Wall-clock time of the most recent real bus answer, across ALL jobs (NOT reset
+    /// per job). Drives time-based liveness (`link_alive(within)`) so the GUI can tell
+    /// a still-connected ECU from one that went silent mid-stream.
+    last_ok: Option<Instant>,
 }
 
 impl Vm {
@@ -107,25 +113,56 @@ impl Vm {
             comm_cfg: cfg,
             awlen_set: false,
             args: Vec::new(),
-            got_response: false,
+            responders: HashSet::new(),
+            last_ok: None,
         }
     }
 
-    /// Whether the last `run_job` saw at least one real (non-empty) bus response.
-    /// Presence probes gate on this, not on `JOB_STATUS`, so a job that returns
-    /// `OKAY` with everything timed out is correctly treated as "no link".
+    /// Whether the last `run_job` saw at least one real (non-empty) bus response from
+    /// ANY address. Presence probes gate on this (not on `JOB_STATUS`), so a job that
+    /// returns `OKAY` with everything timed out is correctly treated as "no link".
     pub fn got_response(&self) -> bool {
-        self.got_response
+        !self.responders.is_empty()
+    }
+
+    /// Whether diagnostic address `addr` specifically answered during the last job.
+    /// Use with the ECU's `wake_addr` so a group probe can't fake-connect on another
+    /// module's reply.
+    pub fn responded_from(&self, addr: u8) -> bool {
+        self.responders.contains(&addr)
+    }
+
+    /// The ECU's wake/diagnostic address from its CommParameter (element [2]), if any.
+    pub fn wake_addr(&self) -> Option<u8> {
+        self.comm_cfg.wake_addr
+    }
+
+    /// Time of the most recent real bus answer (across all jobs), for liveness checks.
+    pub fn last_response_at(&self) -> Option<Instant> {
+        self.last_ok
+    }
+
+    /// Target diagnostic address of an outgoing frame. DS2/KWP1281 requests start with
+    /// the ECU address (`[ADDR]…`); the BMW-FAST family uses `[FMT][TGT][SRC]…`, so the
+    /// target is the second byte.
+    fn frame_target(&self, frame: &[u8]) -> Option<u8> {
+        match self.comm_cfg.protocol {
+            Protocol::BmwFast | Protocol::Kwp2000Bmw | Protocol::DCan => frame.get(1).copied(),
+            _ => frame.first().copied(),
+        }
     }
 
     /// Send `data` and return the response; a comm timeout is NON-fatal (returns
     /// empty so multi-address IDENTIFIKATION jobs can branch), but a real non-empty
-    /// answer marks the job as having reached the ECU.
+    /// answer records WHICH address replied and stamps the liveness clock.
     fn exchange_nonfatal(&mut self, data: &[u8]) -> Vec<u8> {
         match self.transport.exchange(data) {
             Ok(resp) => {
                 if !resp.is_empty() {
-                    self.got_response = true;
+                    if let Some(tgt) = self.frame_target(data) {
+                        self.responders.insert(tgt);
+                    }
+                    self.last_ok = Some(Instant::now());
                 }
                 resp
             }
@@ -192,7 +229,7 @@ impl Vm {
         self.regs.clear();
         self.stack.clear();
         self.call_stack.clear();
-        self.got_response = false;
+        self.responders.clear(); // per-job; `last_ok` persists for cross-job liveness
         let mut ip = 0usize;
         let mut current: ResultSet = HashMap::new();
         let mut sets: Vec<ResultSet> = Vec::new();
@@ -2176,3 +2213,62 @@ impl Vm {
 }
 
 
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+    use crate::error::{Error, Result as CResult};
+
+    /// Minimal transport: returns a canned response, or an error (comm timeout) when
+    /// the canned response is empty.
+    struct MockT {
+        resp: Vec<u8>,
+    }
+    impl Transport for MockT {
+        fn configure(&mut self, _: &CommConfig) -> CResult<()> { Ok(()) }
+        fn init_connection(&mut self) -> CResult<()> { Ok(()) }
+        fn exchange(&mut self, _frame: &[u8]) -> CResult<Vec<u8>> {
+            if self.resp.is_empty() {
+                Err(Error::Vm("timeout".into()))
+            } else {
+                Ok(self.resp.clone())
+            }
+        }
+        fn disconnect(&mut self) -> CResult<()> { Ok(()) }
+    }
+
+    fn vm_with(resp: Vec<u8>, proto: Protocol) -> Vm {
+        let mut cfg = CommConfig::default();
+        cfg.protocol = proto;
+        Vm::new(Box::new(MockT { resp }), HashMap::new(), cfg)
+    }
+
+    #[test]
+    fn ds2_attributes_response_to_target_byte0() {
+        let mut vm = vm_with(vec![0xB8, 0x03, 0xA0], Protocol::Ds2);
+        let r = vm.exchange_nonfatal(&[0xB8, 0x12, 0xF1, 0x04]);
+        assert!(!r.is_empty());
+        assert!(vm.responded_from(0xB8), "target byte[0] must be recorded");
+        assert!(!vm.responded_from(0x80), "unrelated address must not be present");
+        assert!(vm.got_response());
+        assert!(vm.last_response_at().is_some());
+    }
+
+    #[test]
+    fn bmwfast_attributes_response_to_target_byte1() {
+        // BMW-FAST request: [FMT][TGT][SRC]... → target is byte[1].
+        let mut vm = vm_with(vec![0x81, 0xF1, 0x12], Protocol::BmwFast);
+        vm.exchange_nonfatal(&[0x82, 0x12, 0xF1, 0x00]);
+        assert!(vm.responded_from(0x12));
+        assert!(!vm.responded_from(0x82));
+    }
+
+    #[test]
+    fn timeout_records_no_responder_and_no_liveness() {
+        let mut vm = vm_with(Vec::new(), Protocol::Ds2); // empty → simulated timeout
+        let r = vm.exchange_nonfatal(&[0xB8, 0x12]);
+        assert!(r.is_empty());
+        assert!(!vm.got_response());
+        assert!(!vm.responded_from(0xB8));
+        assert!(vm.last_response_at().is_none());
+    }
+}

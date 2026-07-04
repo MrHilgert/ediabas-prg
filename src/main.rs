@@ -24,6 +24,10 @@ enum Command {
     /// Dump the SGBD lookup tables (to locate the measurement selector table)
     Selectors { file: PathBuf },
 
+    /// Print `<file>\t<protocol>\t<addr>\t<baud>` for each .prg (feeds the GUI catalog
+    /// generator with the ECU's real bus/address, statically from its CommParameter).
+    Meta { files: Vec<PathBuf> },
+
     /// Run a job against a simulated ECU using an EDIABAS .SIM file
     Sim {
         #[arg(short, long)]
@@ -170,6 +174,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             prg::PrgFile::open(&file)
                 .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); })
                 .print_info()
+        }
+        Command::Meta { files } => {
+            use ediabas::config::Protocol;
+            for f in &files {
+                let name = f.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+                match prg::PrgFile::open(f) {
+                    Ok(p) => match p.initial_comm_config() {
+                        Some(cfg) => {
+                            let proto = match cfg.protocol {
+                                Protocol::Ds2 => "DS2",
+                                Protocol::Kwp1281 => "KWP1281",
+                                Protocol::Kwp2000Bmw => "KWP2000",
+                                Protocol::BmwFast => "BMW-FAST",
+                                Protocol::DCan => "D-CAN",
+                            };
+                            let addr = cfg.wake_addr.map(|a| format!("0x{a:02X}")).unwrap_or_else(|| "-".into());
+                            println!("{name}\t{proto}\t{addr}\t{}", cfg.baud);
+                        }
+                        None => println!("{name}\t-\t-\t-"),
+                    },
+                    Err(_) => println!("{name}\t?\t?\t?"),
+                }
+            }
+            Ok(())
         }
         Command::Jobs { file } => {
             prg::PrgFile::open(&file)

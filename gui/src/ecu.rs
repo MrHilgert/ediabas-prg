@@ -160,11 +160,13 @@ fn engine_module(mark: &'static str, chassis: &str) -> Module {
     }
 }
 
-/// Build a Module from a CFGDAT catalog entry (bus/addr aren't in CFGDAT).
+/// Build a Module from a CFGDAT catalog entry. `bus`/`addr` come from the ECU's own
+/// `.prg` CommParameter (static concept probe, emitted by the generator) — no longer a
+/// validated-DS2 placeholder.
 fn catalog_module(e: &crate::catalog::CatEntry) -> Module {
     Module {
         code: e.code, ru: e.ru, en: e.en, cat: e.cat,
-        bus: if e.validated { "DS2" } else { "—" }, addr: "—",
+        bus: e.bus, addr: e.addr,
         // The CFGDAT catalog `code` IS the INPA script name (e.g. "DDE40", "ascdsc46") →
         // its `SGDAT/<code>.ipo` is the screen source.
         from: 0, to: 9999, awd_only: false, script: Some(e.code), prg: e.prg,

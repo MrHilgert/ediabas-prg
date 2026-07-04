@@ -12,6 +12,8 @@ Re-run:  python tools/gen_catalog.py
 import os
 import re
 import glob
+import sys
+import subprocess
 
 import ipo_parse    # sibling module: .ipo screen-script parsing
 import meas_extract # sibling module: .ipo live-measurement screen extraction
@@ -199,6 +201,8 @@ out.append("    pub cat: Category,")
 out.append("    pub ru: &'static str,")
 out.append("    pub en: &'static str,")
 out.append("    pub prg: Option<&'static str>,")
+out.append("    pub bus: &'static str,    // protocol family from the .prg CommParameter (or \"—\")")
+out.append("    pub addr: &'static str,   // ECU diagnostic address, hex, from the .prg (or \"—\")")
 out.append("    pub validated: bool,      // confirmed connectable (DS2, tested)")
 out.append("}")
 out.append("")
@@ -207,6 +211,34 @@ out.append("    pub chassis: &'static str,")
 out.append("    pub entries: &'static [CatEntry],")
 out.append("}")
 out.append("")
+
+def prg_meta():
+    """Map each `ecu/*.prg` basename → (bus, addr) via the Rust `ediabas-prg meta`
+    command — the SINGLE source of truth for the CommParameter concept, so the Python
+    generator never re-implements (and drifts from) the decoder. A missing binary or a
+    .prg with no CommParameter just stays out of the map (caller defaults to '—')."""
+    exe = os.path.join(ROOT, "target", "release", "ediabas-prg")
+    if not os.path.exists(exe) and os.path.exists(exe + ".exe"):
+        exe += ".exe"
+    if not os.path.exists(exe):
+        print(f"WARNING: {exe} not found — `cargo build --release` for real bus/addr; using '—'", file=sys.stderr)
+        return {}
+    files = glob.glob(os.path.join(ECU, "*.prg")) + glob.glob(os.path.join(ECU, "*.PRG"))
+    meta = {}
+    for i in range(0, len(files), 200):  # chunk to stay under command-line length limits
+        chunk = files[i:i + 200]
+        try:
+            out = subprocess.run([exe, "meta", *chunk], capture_output=True, text=True, timeout=600).stdout
+        except Exception as e:
+            print(f"WARNING: `meta` failed: {e}", file=sys.stderr)
+            break
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 4 and parts[1] not in ("-", "?", ""):
+                meta[parts[0].lower()] = (parts[1], parts[2])
+    return meta
+
+PRG_META = prg_meta()
 
 n_ch = 0
 n_en = 0
@@ -229,9 +261,11 @@ for chassis in sorted(tree.keys()):
                 n_prg += 1
             validated = "true" if (prg in VALIDATED) else "false"
             prg_rs = f"Some({rs_str(prg)})" if prg else "None"
+            bus, addr = PRG_META.get((prg or "").lower(), ("—", "—"))
             rows.append(
                 f"    CatEntry {{ code: {rs_str(script.strip())}, cat: Category::{cat}, "
-                f"ru: {rs_str(ru)}, en: {rs_str(en)}, prg: {prg_rs}, validated: {validated} }},"
+                f"ru: {rs_str(ru)}, en: {rs_str(en)}, prg: {prg_rs}, "
+                f"bus: {rs_str(bus)}, addr: {rs_str(addr)}, validated: {validated} }},"
             )
     if not rows:
         continue

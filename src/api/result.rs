@@ -151,23 +151,27 @@ impl ResultSet {
         self.map.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// Result `name` as an integer (parses strings, truncates floats).
+    /// Result `name` as an integer (parses strings, truncates floats). Returns `None`
+    /// when the value is binary or an unparsable string — NOT a silent `0`, so a real
+    /// zero is distinguishable from "no numeric value" (and `JobResult` search skips to
+    /// the next set instead of stopping on a non-numeric hit).
     pub fn get_i64(&self, name: &str) -> Option<i64> {
-        self.get(name).map(|v| match v {
-            Value::Long(n) => *n as i64,
-            Value::Float(f) => *f as i64,
-            Value::Str(s) => s.trim().parse().unwrap_or(0),
-            Value::Data(_) => 0,
+        self.get(name).and_then(|v| match v {
+            Value::Long(n) => Some(*n as i64),
+            Value::Float(f) => Some(*f as i64),
+            Value::Str(s) => s.trim().parse().ok(),
+            Value::Data(_) => None,
         })
     }
 
-    /// Result `name` as a float (parses strings; accepts `,` or `.` decimals).
+    /// Result `name` as a float (parses strings; accepts `,` or `.` decimals). Returns
+    /// `None` for binary/unparsable values rather than a silent `0.0`.
     pub fn get_f64(&self, name: &str) -> Option<f64> {
-        self.get(name).map(|v| match v {
-            Value::Float(f) => *f,
-            Value::Long(n) => *n as f64,
-            Value::Str(s) => s.trim().replace(',', ".").parse().unwrap_or(0.0),
-            Value::Data(_) => 0.0,
+        self.get(name).and_then(|v| match v {
+            Value::Float(f) => Some(*f),
+            Value::Long(n) => Some(*n as f64),
+            Value::Str(s) => s.trim().replace(',', ".").parse().ok(),
+            Value::Data(_) => None,
         })
     }
 

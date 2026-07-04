@@ -279,7 +279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if times.is_empty() {
                             eprintln!("all {repeat} polls failed"); std::process::exit(1);
                         }
-                        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        times.sort_by(|a, b| a.total_cmp(b));
                         let n = times.len();
                         let sum: f64 = times.iter().sum();
                         let avg = sum / n as f64;
@@ -365,7 +365,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             port_dev.read_exact(&mut hdr)?;
             eprintln!("RESP HDR: {}", fmt_hex(&hdr));
             if hdr[0] == 0x01 {
-                let resp_len = u16::from_le_bytes([hdr[1], hdr[2]]) as usize - 3;
+                let resp_len = (u16::from_le_bytes([hdr[1], hdr[2]]) as usize).saturating_sub(3);
                 let mut resp = vec![0u8; resp_len];
                 port_dev.read_exact(&mut resp)?;
                 eprintln!("RESP ({} bytes): {}", resp.len(), fmt_hex(&resp));

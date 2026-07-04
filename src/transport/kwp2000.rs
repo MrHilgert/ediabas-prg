@@ -74,14 +74,16 @@ impl Kwp2000Transport {
     /// of a BMW-FAST frame. `hdr` must hold at least 4 bytes; for the extra-long form
     /// it must hold 6. Returns the length in bytes of `[header..payload]`.
     fn tel_length_bmwfast(hdr: &[u8]) -> usize {
-        let n = (hdr[0] & 0x3f) as usize;
+        // Bounds-safe: a short/garbled header reads missing bytes as 0 instead of panicking.
+        let g = |i: usize| hdr.get(i).copied().unwrap_or(0);
+        let n = (g(0) & 0x3f) as usize;
         if n != 0 {
             n + 3 // short: FMT=0x80|N, TGT, SRC, N payload
-        } else if hdr[3] != 0 {
-            hdr[3] as usize + 4 // long: LEN at [3]
+        } else if g(3) != 0 {
+            g(3) as usize + 4 // long: LEN at [3]
         } else {
             // extra-long (BMW extension): 16-bit big-endian length at [4][5]
-            let len16 = ((hdr[4] as usize) << 8) | hdr[5] as usize;
+            let len16 = ((g(4) as usize) << 8) | g(5) as usize;
             len16 + 6
         }
     }

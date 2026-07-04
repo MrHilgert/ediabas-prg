@@ -164,6 +164,11 @@ impl Vm {
     }
 
     /// n-th argument (1-based) parsed as an integer, else 0.
+    ///
+    /// EDIABAS ArgString numeric args are HEX by convention (e.g. a `2C10` selector),
+    /// with or without a `0x` prefix — so we parse base-16 first. The decimal branch is
+    /// a deliberate fallback for the rare arg that isn't valid hex; do NOT flip the
+    /// order (it would read hex selectors like "0F30" as decimal and break telegrams).
     fn arg_int(&self, n: usize) -> i32 {
         let segs = self.arg_segments();
         if n == 0 || n > segs.len() { return 0; }
@@ -406,7 +411,7 @@ impl Vm {
                     let hi = mode >> 4;
                     let lo = mode & 0xf;
                     let width = nib_width(hi);
-                    let dst = code[ip + 2];
+                    let dst = code.get(ip + 2).copied().unwrap_or(0);
                     let base = code[ip + 3];
                     let (offset, next) = if lo == 0x9 {
                         let lo_b = code.get(ip + 4).copied().unwrap_or(0);
@@ -438,7 +443,7 @@ impl Vm {
                        && ip + 3 < code.len() =>
                 {
                     let lo = mode & 0xf;
-                    let dst = code[ip + 2];
+                    let dst = code.get(ip + 2).copied().unwrap_or(0);
                     if let Some((base, idx, len, next)) = self.read_slice_operand(lo, code, ip + 3) {
                         let src = self.reg_bytes(&base);
                         let slice: Vec<u8> = (0..len).map(|i| src.get(idx + i).copied().unwrap_or(0)).collect();
@@ -1701,7 +1706,7 @@ impl Vm {
                     let (hi, lo) = (mode >> 4, mode & 0xf);
                     let pos0 = ip + 2;
                     let l0 = nibble_size(hi, code, pos0);
-                    let dst = code[pos0];
+                    let dst = code.get(pos0).copied().unwrap_or(0);
                     let (src, l1) = self.read_flt_src(code, pos0 + l0, lo);
                     let a = self.reg_flt(dst);
                     let r = match opcode {
@@ -1722,7 +1727,7 @@ impl Vm {
                     let (hi, lo) = (mode >> 4, mode & 0xf);
                     let pos0 = ip + 2;
                     let l0 = nibble_size(hi, code, pos0);
-                    let a = self.reg_flt(code[pos0]);
+                    let a = self.reg_flt(code.get(pos0).copied().unwrap_or(0));
                     let (b, l1) = self.read_flt_src(code, pos0 + l0, lo);
                     let d = a - b;
                     self.flags.zero = d == 0.0;
@@ -1753,7 +1758,7 @@ impl Vm {
                 [0x7f, ..] if ip + 1 < code.len() => {
                     let mode = code[ip + 1];
                     let (hi, lo) = (mode >> 4, mode & 0xf);
-                    let dst = code[ip + 2];
+                    let dst = code.get(ip + 2).copied().unwrap_or(0);
                     let s = blat(&self.args);
                     // EDIABAS OpPary: Zero = true (no arg); Zero = false when arg present.
                     self.flags.zero = self.args.is_empty();
@@ -1765,7 +1770,7 @@ impl Vm {
                 [0x80, ..] if ip + 1 < code.len() => {
                     let mode = code[ip + 1];
                     let (hi, lo) = (mode >> 4, mode & 0xf);
-                    let dst = code[ip + 2];
+                    let dst = code.get(ip + 2).copied().unwrap_or(0);
                     let n = self.arg_segments().len() as i32;
                     self.flags.zero = n == 0;
                     self.regs.insert(dst, Value::Long(n));
@@ -1777,7 +1782,7 @@ impl Vm {
                     let opcode = code[ip];
                     let mode = code[ip + 1];
                     let (hi, lo) = (mode >> 4, mode & 0xf);
-                    let dst = code[ip + 2];
+                    let dst = code.get(ip + 2).copied().unwrap_or(0);
                     let l0 = nibble_size(hi, code, ip + 2);
                     let n = read_imm_u32(code, ip + 2 + l0, lo) as usize;
                     let seg = self.arg_segments().get(n.wrapping_sub(1)).map(|s| s.to_vec());
@@ -1798,7 +1803,7 @@ impl Vm {
                     let opcode = code[ip];
                     let mode = code[ip + 1];
                     let (hi, lo) = (mode >> 4, mode & 0xf);
-                    let dst = code[ip + 2];
+                    let dst = code.get(ip + 2).copied().unwrap_or(0);
                     let l0 = nibble_size(hi, code, ip + 2);
                     let n = read_imm_u32(code, ip + 2 + l0, lo) as usize;
                     let seg_count = self.arg_segments().len();
@@ -1811,7 +1816,6 @@ impl Vm {
                     }
                     ip += 2 + l0 + nibble_size(lo, code, ip + 2 + l0);
                 }
-                [0x80, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // parn
 
                 // ── shared memory (no-op) ─────────────────────────────────────
                 [0x93, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // shmset
@@ -2133,21 +2137,23 @@ impl Vm {
     /// Read the second operand of a float instruction as f64, honouring its
     /// addressing-mode nibble. Returns (value, operand_byte_len).
     fn read_flt_src(&self, code: &[u8], pos: usize, nib: u8) -> (f64, usize) {
+        // Bounds-safe byte read: a truncated operand at end-of-code yields 0, never panics.
+        let g = |i: usize| code.get(i).copied().unwrap_or(0);
         match nib {
-            1 => (self.reg_flt(code[pos]), 1),                       // RegS
-            2 => (self.get_byte_reg(code[pos]) as f64, 1),          // RegAb
-            3 | 4 => (                                               // RegI / RegL
-                self.regs.get(&code[pos]).map(Value::as_long).unwrap_or(0) as f64, 1),
-            5 => (code[pos] as f64, 1),                              // Imm8
-            6 => (u16::from_le_bytes([code[pos], code[pos + 1]]) as f64, 2),
+            1 => (self.reg_flt(g(pos)), 1),                         // RegS
+            2 => (self.get_byte_reg(g(pos)) as f64, 1),            // RegAb
+            3 | 4 => (                                              // RegI / RegL
+                self.regs.get(&g(pos)).map(Value::as_long).unwrap_or(0) as f64, 1),
+            5 => (g(pos) as f64, 1),                                // Imm8
+            6 => (u16::from_le_bytes([g(pos), g(pos + 1)]) as f64, 2),
             7 => (i32::from_le_bytes(
-                    [code[pos], code[pos + 1], code[pos + 2], code[pos + 3]]) as f64, 4),
-            8 => {                                                   // ImmStr → parse
-                let n = code[pos] as usize | ((code[pos + 1] as usize) << 8);
-                let s = cstr(&code[pos + 2..(pos + 2 + n).min(code.len())]);
+                    [g(pos), g(pos + 1), g(pos + 2), g(pos + 3)]) as f64, 4),
+            8 => {                                                  // ImmStr → parse
+                let n = g(pos) as usize | ((g(pos + 1) as usize) << 8);
+                let s = cstr(code.get(pos + 2..(pos + 2 + n).min(code.len())).unwrap_or(&[]));
                 (parse_f64(&s), 2 + n)
             }
-            _ => (0.0, nibble_size(nib, code, pos)),                 // indexed fallback
+            _ => (0.0, nibble_size(nib, code, pos)),                // indexed fallback
         }
     }
 

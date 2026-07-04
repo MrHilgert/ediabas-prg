@@ -28,11 +28,10 @@ fn latin1(bytes: &[u8]) -> String {
 /// Read a null-terminated string from `section` at `offset`.
 /// Returns (string, offset_after_null).
 fn read_cstring_at(section: &[u8], offset: usize) -> (String, usize) {
-    let end = section[offset..].iter().position(|&b| b == 0)
-        .map(|i| offset + i)
-        .unwrap_or(section.len());
-    let s = latin1(&section[offset..end]);
-    (s, end + 1)
+    let slice = section.get(offset..).unwrap_or(&[]);
+    let rel_end = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+    let s = latin1(&slice[..rel_end]);
+    (s, offset + rel_end + 1)
 }
 
 /// Column names are all-uppercase ASCII letters, digits, and underscores.
@@ -45,8 +44,13 @@ fn read_cstring(buf: &[u8]) -> String {
     latin1(&buf[..end])
 }
 
+/// Read a little-endian u32 at `offset`; out-of-bounds yields 0 (never panics).
+/// Header pointers read this way are validated in `open`; truncated tables degrade
+/// to "no more entries" rather than crashing.
 fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap())
+    buf.get(offset..offset + 4)
+        .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+        .unwrap_or(0)
 }
 
 // Parses key:value metadata lines from PTR_SGBD section.
@@ -210,6 +214,16 @@ impl PrgFile {
         let ptr_results = read_u32_le(&data, PTR_RESULTS);
         let ptr_sgbd = read_u32_le(&data, PTR_SGBD);
 
+        // Header pointers are raw file offsets; a truncated/malformed .prg could point
+        // out of bounds. Validate the code→jobs span (sliced in job_code) up front so
+        // later access degrades to an error here instead of panicking deep in parsing.
+        if ptr_code as usize > ptr_jobs as usize || ptr_jobs as usize > data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "EDIABAS .prg: code/jobs pointers out of range",
+            ));
+        }
+
         Ok(Self { data, header: PrgHeader { version, ptr_code, ptr_jobs, ptr_results, ptr_sgbd } })
     }
 
@@ -316,7 +330,13 @@ impl PrgFile {
         let cell = |r: &[String], c: Option<usize>| {
             c.and_then(|i| r.get(i)).map_or(String::new(), |s| s.clone())
         };
-        let num = |s: String| s.trim().replace(',', ".").parse::<f64>().unwrap_or(0.0);
+        // FACT_A is a multiplier (identity = 1.0), FACT_B an offset (0.0). An empty or
+        // unparsable factor must fall back to its IDENTITY, not a blanket 0.0 — a 0.0
+        // FACT_A would silently zero out the whole channel (value = raw*0 + b).
+        let num = |s: String, default: f64| {
+            let t = s.trim().replace(',', ".");
+            if t.is_empty() { default } else { t.parse::<f64>().unwrap_or(default) }
+        };
         t.rows
             .iter()
             .filter_map(|r| {
@@ -335,8 +355,8 @@ impl PrgFile {
                     selector,
                     unit: cell(r, c_meas),
                     label: cell(r, c_ln),
-                    fact_a: num(cell(r, c_fa)),
-                    fact_b: num(cell(r, c_fb)),
+                    fact_a: num(cell(r, c_fa), 1.0),
+                    fact_b: num(cell(r, c_fb), 0.0),
                 })
             })
             .collect()
@@ -404,7 +424,8 @@ impl PrgFile {
     pub fn job_code(&self, name: &str) -> Option<Vec<u8>> {
         let ptr_code = self.header.ptr_code as usize;
         let ptr_jobs = self.header.ptr_jobs as usize;
-        let code_raw = &self.data[ptr_code..ptr_jobs];
+        // Validated in `open`, but stay defensive: a bad span yields None, not a panic.
+        let code_raw = self.data.get(ptr_code..ptr_jobs)?;
 
         // Build sorted list of (code_offset, name) pairs
         let mut entries: Vec<(usize, String)> = self
@@ -418,13 +439,14 @@ impl PrgFile {
             .iter()
             .position(|(_, n)| n.eq_ignore_ascii_case(name))?;
 
-        let start = entries[idx].0 - ptr_code;
+        // A job whose code_offset is below ptr_code (corrupt table) → None, not underflow.
+        let start = entries[idx].0.checked_sub(ptr_code)?;
         let end = entries
             .get(idx + 1)
-            .map(|(off, _)| off - ptr_code)
+            .and_then(|(off, _)| off.checked_sub(ptr_code))
             .unwrap_or(code_raw.len());
 
-        Some(xor_decode(&code_raw[start..end]))
+        Some(xor_decode(code_raw.get(start..end)?))
     }
 
     /// Statically determine the ECU's communication concept WITHOUT any I/O.

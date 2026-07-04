@@ -87,9 +87,11 @@ impl Session {
             .ok_or_else(|| Error::Vm(format!("job '{job}' not found in .prg")))?;
         self.vm.set_args(args.to_vec());
         let sets = self.vm.run_job(&code).map_err(Error::Vm)?;
+        let comm_ok = self.vm.got_response();
         Ok(JobResult::new(
             sets.into_iter().map(ResultSet::from_map).collect(),
-        ))
+        )
+        .with_comm(comm_ok))
     }
 
     /// Names of all jobs defined in the loaded `.prg`.

@@ -9,11 +9,26 @@ use crate::vm::Value;
 #[derive(Debug, Clone, Default)]
 pub struct JobResult {
     sets: Vec<ResultSet>,
+    /// True if the job actually received a real bus response (see [`Vm::got_response`]).
+    /// A presence probe must check this, not just `JOB_STATUS`.
+    comm_ok: bool,
 }
 
 impl JobResult {
     pub(crate) fn new(sets: Vec<ResultSet>) -> Self {
-        JobResult { sets }
+        JobResult { sets, comm_ok: false }
+    }
+
+    /// Record whether the run reached the ECU (a real telegram round-trip happened).
+    pub(crate) fn with_comm(mut self, comm_ok: bool) -> Self {
+        self.comm_ok = comm_ok;
+        self
+    }
+
+    /// True if the job actually got a response from the ECU. Unlike `JOB_STATUS=OKAY`
+    /// (which a job may set even when every send timed out), this reflects a real link.
+    pub fn comm_ok(&self) -> bool {
+        self.comm_ok
     }
 
     /// All result sets, in order.
@@ -23,6 +38,7 @@ impl JobResult {
 
     /// Append another result's sets (used to merge several polled jobs into one view).
     pub fn extend(&mut self, other: JobResult) {
+        self.comm_ok |= other.comm_ok; // any real response counts as a live link
         self.sets.extend(other.sets);
     }
 
@@ -30,6 +46,7 @@ impl JobResult {
     /// a single set. Used to hold last-known values across streaming polls: a name missing
     /// from `other` keeps its previous value, and repeated polls don't grow the set list.
     pub fn overlay(&mut self, other: JobResult) {
+        self.comm_ok |= other.comm_ok;
         let mut flat: HashMap<String, Value> = HashMap::new();
         for set in self.sets.drain(..) {
             flat.extend(set.map);

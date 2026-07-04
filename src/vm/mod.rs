@@ -80,6 +80,11 @@ pub struct Vm {
     awlen_set: bool,
     /// Job argument buffer (EDIABAS ArgString), read via par*/pary opcodes.
     args: Vec<u8>,
+    /// Set true once any `xsend` in the current job got a REAL (non-empty) bus
+    /// response. Distinguishes "ECU actually answered" from a job that reports
+    /// `JOB_STATUS=OKAY` after every send timed out (which must NOT count as a live
+    /// connection — otherwise a probe fake-connects to absent modules).
+    got_response: bool,
 }
 
 impl Vm {
@@ -96,6 +101,32 @@ impl Vm {
             comm_cfg: CommConfig::default(),
             awlen_set: false,
             args: Vec::new(),
+            got_response: false,
+        }
+    }
+
+    /// Whether the last `run_job` saw at least one real (non-empty) bus response.
+    /// Presence probes gate on this, not on `JOB_STATUS`, so a job that returns
+    /// `OKAY` with everything timed out is correctly treated as "no link".
+    pub fn got_response(&self) -> bool {
+        self.got_response
+    }
+
+    /// Send `data` and return the response; a comm timeout is NON-fatal (returns
+    /// empty so multi-address IDENTIFIKATION jobs can branch), but a real non-empty
+    /// answer marks the job as having reached the ECU.
+    fn exchange_nonfatal(&mut self, data: &[u8]) -> Vec<u8> {
+        match self.transport.exchange(data) {
+            Ok(resp) => {
+                if !resp.is_empty() {
+                    self.got_response = true;
+                }
+                resp
+            }
+            Err(e) => {
+                trace!("[xsend] comm timeout (non-fatal): {e}");
+                Vec::new()
+            }
         }
     }
 
@@ -128,6 +159,7 @@ impl Vm {
         self.regs.clear();
         self.stack.clear();
         self.call_stack.clear();
+        self.got_response = false;
         let mut ip = 0usize;
         let mut current: ResultSet = HashMap::new();
         let mut sets: Vec<ResultSet> = Vec::new();
@@ -1450,15 +1482,7 @@ impl Vm {
                         return Err(format!("XSEND truncated at ip={ip:#x}"));
                     }
                     let telegram = &code[ip + 5..ip + 5 + n];
-                    let response = self.transport.exchange(telegram)
-                        .unwrap_or_else(|e| {
-                            // A comm timeout is NOT fatal: EDIABAS jobs (esp. group
-                            // IDENTIFIKATION) probe several addresses and branch on an
-                            // empty response. Return empty and let the bytecode decide,
-                            // instead of aborting the whole job with a hard error.
-                            trace!("[xsend] comm timeout (non-fatal): {e}");
-                            Vec::new()
-                        });
+                    let response = self.exchange_nonfatal(telegram);
                     self.regs.insert(*dst_reg, Value::Data(response));
                     ip += 5 + n;
                 }
@@ -1468,15 +1492,7 @@ impl Vm {
                     let data = self.reg_bytes(src);
                     trace!("XSEND telegram ({} bytes): {}", data.len(),
                         data.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "));
-                    let response = self.transport.exchange(&data)
-                        .unwrap_or_else(|e| {
-                            // A comm timeout is NOT fatal: EDIABAS jobs (esp. group
-                            // IDENTIFIKATION) probe several addresses and branch on an
-                            // empty response. Return empty and let the bytecode decide,
-                            // instead of aborting the whole job with a hard error.
-                            trace!("[xsend] comm timeout (non-fatal): {e}");
-                            Vec::new()
-                        });
+                    let response = self.exchange_nonfatal(&data);
                     trace!("XSEND response ({} bytes): {}", response.len(),
                         response.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "));
                     self.regs.insert(*dst, Value::Data(response));
@@ -1486,15 +1502,7 @@ impl Vm {
                 // xsend with data register: 2a 14 DST SRC
                 [0x2a, 0x14, dst, src, ..] => {
                     let data = self.reg_bytes(src);
-                    let response = self.transport.exchange(&data)
-                        .unwrap_or_else(|e| {
-                            // A comm timeout is NOT fatal: EDIABAS jobs (esp. group
-                            // IDENTIFIKATION) probe several addresses and branch on an
-                            // empty response. Return empty and let the bytecode decide,
-                            // instead of aborting the whole job with a hard error.
-                            trace!("[xsend] comm timeout (non-fatal): {e}");
-                            Vec::new()
-                        });
+                    let response = self.exchange_nonfatal(&data);
                     self.regs.insert(*dst, Value::Data(response));
                     ip += 4;
                 }

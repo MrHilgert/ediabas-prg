@@ -226,16 +226,22 @@ fn probe_presence(s: &mut Session) -> Result<(), String> {
     };
     match s.run_job(job, "") {
         Ok(r) => {
-            // Present if the SGBD reports OKAY, or (no JOB_STATUS) returned data.
-            let present = r
+            // A job can set JOB_STATUS=OKAY even when every telegram timed out (comm
+            // errors are non-fatal so multi-address ident jobs can branch). So presence
+            // is gated on a REAL bus response first — otherwise absent modules would
+            // fake-connect. Only then trust JOB_STATUS / returned data.
+            if !r.comm_ok() {
+                return Err("ЭБУ не отвечает (нет ответа с шины)".into());
+            }
+            let ok = r
                 .job_status()
                 .map(|st| st.to_ascii_uppercase().contains("OKAY"))
                 .unwrap_or_else(|| !r.is_empty());
-            if present {
+            if ok {
                 Ok(())
             } else {
                 Err(format!(
-                    "ЭБУ не отвечает ({job}: {})",
+                    "ЭБУ ответил, но статус: {}",
                     r.job_status().unwrap_or_else(|| "нет данных".into())
                 ))
             }

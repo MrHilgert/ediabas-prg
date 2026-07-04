@@ -163,15 +163,24 @@ impl Ds2Transport {
     ///
     /// Returns payload bytes (after header, before CHK).
     fn receive(&mut self) -> Result<Vec<u8>> {
+        // Guard against a garbage len format (e.g. an xawlen we mis-parsed): a bad
+        // len_offset must surface as a protocol error, never a panic. `len_offset + 1`
+        // wraps to 0 when len_offset is usize::MAX, so check the raw value directly.
+        if self.len_offset == 0 || self.len_offset > 8 {
+            return Err(Error::Protocol(format!(
+                "DS2: implausible len_offset {}",
+                self.len_offset
+            )));
+        }
         let hdr_len = self.len_offset + 1;
         let mut header = vec![0u8; hdr_len];
         self.driver.read_exact(&mut header)?;
 
         let len_byte = header[self.len_offset] as usize;
         let total = len_byte + self.len_add;
-        if total < hdr_len + 1 {
+        if total < hdr_len + 1 || total > 4096 {
             return Err(Error::Protocol(format!(
-                "DS2: LEN={len_byte} + add={} = {total} too small (header={hdr_len})",
+                "DS2: LEN={len_byte} + add={} = {total} out of range (header={hdr_len})",
                 self.len_add
             )));
         }

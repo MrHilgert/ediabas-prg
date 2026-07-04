@@ -1547,11 +1547,22 @@ impl Vm {
                     let n = (*nn_lo as usize) | ((*nn_hi as usize) << 8);
                     if n >= 3 && ip + 4 + n <= code.len() {
                         let p = &code[ip + 4..ip + 4 + n];
-                        self.comm_cfg.len_offset = (-(p[0] as i8)) as usize;
-                        self.comm_cfg.len_add    = p[2] as usize;
+                        // CommAnswerLen[0]: NEGATIVE (as i8) = dynamic — the LEN byte
+                        // sits at offset -p[0] (0xFF→1, 0xFE→2); p[2] is the addend.
+                        // NON-negative = not an offset spec we model (e.g. a fixed-length
+                        // hint); fall back to old-style DS2 (LEN@1, total=LEN) instead of
+                        // computing a garbage usize that would crash `receive()`.
+                        let s = p[0] as i8;
+                        let (lo, la) = if s < 0 {
+                            (((-s) as usize).clamp(1, 8), p[2] as usize)
+                        } else {
+                            (1, 0)
+                        };
+                        self.comm_cfg.len_offset = lo;
+                        self.comm_cfg.len_add    = la;
                         self.awlen_set = true; // authoritative from now on; xsetpar won't reset it
-                        trace!("[xawlen] len_offset={} len_add={}",
-                            self.comm_cfg.len_offset, self.comm_cfg.len_add);
+                        trace!("[xawlen] raw={:02X?} -> len_offset={} len_add={}",
+                            p, self.comm_cfg.len_offset, self.comm_cfg.len_add);
                         if let Err(e) = self.transport.configure(&self.comm_cfg) {
                             trace!("[xawlen@{ip:#x}] configure failed: {e}");
                         }

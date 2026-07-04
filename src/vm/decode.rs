@@ -83,7 +83,13 @@ pub(crate) fn read_str_at(regs: &HashMap<u8, Value>, nibble: u8, code: &[u8], po
             if pos + 1 < code.len() {
                 let n = code[pos] as usize | ((code[pos+1] as usize) << 8);
                 let end = (pos + 2 + n).min(code.len());
-                let s = cstr(&code[pos+2..end]);
+                // ImmStr carries an EXPLICIT length `n`, so 0x00 bytes inside are DATA,
+                // not a C terminator. Use byte-preserving `blat`, not `cstr` — otherwise
+                // binary telegram/CommAnswerLen constants with trailing/embedded nulls
+                // (e.g. `D0 04 00` → `D0 04`, `FF FF 00 00` → `FF FF`) get truncated and
+                // the request/answer framing breaks. Text constants have no nulls, so
+                // they are unaffected.
+                let s = blat(&code[pos+2..end]);
                 (s, pos + 2 + n)
             } else { (String::new(), pos) }
         }

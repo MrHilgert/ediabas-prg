@@ -130,6 +130,28 @@ impl Vm {
         }
     }
 
+    /// Apply a CommAnswerLen array (from `xawlen`, opcode 0x29) to the frame-length
+    /// format. `arr[0]` as i8 NEGATIVE = dynamic: the LEN byte sits at offset
+    /// `-arr[0]` (0xFF→1, 0xFD→3), total = LEN + `arr[2]`. This decodes BOTH old-style
+    /// DS2 (`FF FF 00 00` → LEN@1,+0) and the 4-byte BMW format (`FD FF 05 00` →
+    /// LEN@3,+5) from the SAME array — whether it came inline or from a register. An
+    /// array we couldn't read (empty/short) or a non-negative `arr[0]` falls back to
+    /// old-style DS2 so the concept's LEN@3 can't linger and mis-frame the reply.
+    fn apply_awlen(&mut self, arr: &[u8]) {
+        let (lo, la) = if arr.len() >= 3 && (arr[0] as i8) < 0 {
+            (((-(arr[0] as i8)) as usize).clamp(1, 8), arr[2] as usize)
+        } else {
+            (1, 0)
+        };
+        self.comm_cfg.len_offset = lo;
+        self.comm_cfg.len_add = la;
+        self.awlen_set = true; // authoritative from now on; xsetpar won't reset it
+        trace!("[xawlen] arr={arr:02X?} -> len_offset={lo} len_add={la}");
+        if let Err(e) = self.transport.configure(&self.comm_cfg) {
+            trace!("[xawlen] configure failed: {e}");
+        }
+    }
+
     /// Set the job argument buffer (EDIABAS ArgString) before running a job.
     pub fn set_args(&mut self, args: Vec<u8>) {
         self.args = args;
@@ -1571,32 +1593,30 @@ impl Vm {
                     ip += 4 + n;
                 }
 
-                // xawlen (29 80): ImmStr with 4-byte CommAnswerLen
+                // xawlen (29 80): ImmStr CommAnswerLen carried inline.
                 [0x29, 0x80, nn_lo, nn_hi, ..] => {
                     let n = (*nn_lo as usize) | ((*nn_hi as usize) << 8);
-                    if n >= 3 && ip + 4 + n <= code.len() {
-                        let p = &code[ip + 4..ip + 4 + n];
-                        // CommAnswerLen[0]: NEGATIVE (as i8) = dynamic — the LEN byte
-                        // sits at offset -p[0] (0xFF→1, 0xFE→2); p[2] is the addend.
-                        // NON-negative = not an offset spec we model (e.g. a fixed-length
-                        // hint); fall back to old-style DS2 (LEN@1, total=LEN) instead of
-                        // computing a garbage usize that would crash `receive()`.
-                        let s = p[0] as i8;
-                        let (lo, la) = if s < 0 {
-                            (((-s) as usize).clamp(1, 8), p[2] as usize)
-                        } else {
-                            (1, 0)
-                        };
-                        self.comm_cfg.len_offset = lo;
-                        self.comm_cfg.len_add    = la;
-                        self.awlen_set = true; // authoritative from now on; xsetpar won't reset it
-                        trace!("[xawlen] raw={:02X?} -> len_offset={} len_add={}",
-                            p, self.comm_cfg.len_offset, self.comm_cfg.len_add);
-                        if let Err(e) = self.transport.configure(&self.comm_cfg) {
-                            trace!("[xawlen@{ip:#x}] configure failed: {e}");
-                        }
+                    if ip + 4 + n <= code.len() {
+                        let arr = code[ip + 4..ip + 4 + n].to_vec();
+                        self.apply_awlen(&arr);
                     }
                     ip += 4 + n;
+                }
+
+                // xawlen from a REGISTER (e.g. `29 10 REG` — CommAnswerLen held in a
+                // string register). Common in variant SGBDs (LCM_III etc.); if left as an
+                // "unknown opcode" the concept's LEN@3 lingers and mis-frames an old-style
+                // reply → the ECU looks silent though it answered. Read the array from the
+                // string register (mode hi-nibble 1 = RegS) and decode it like the inline
+                // form; apply_awlen falls back to LEN@1 if the register isn't readable.
+                [0x29, mode, ..] => {
+                    let arr = if (mode >> 4) == 1 {
+                        code.get(ip + 2).map(|r| self.reg_bytes(r)).unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    self.apply_awlen(&arr);
+                    ip = skip_instr(code, ip);
                 }
 
                 // xbatt/xgetport/xsetport/xignit/xloopt/xsireset/xstoptr/xprog (no-op)

@@ -244,32 +244,12 @@ fn probe_presence(s: &mut Session) -> Result<(), String> {
     }
 }
 
-/// Locate `ecu/<name>` regardless of the current working directory: try cwd,
-/// then walk up from both the cwd and the executable's directory (dev builds
-/// live under `target/…`, with `ecu/` at the workspace root).
+/// Locate `ecu/<name>` regardless of the current working directory and filename
+/// case: walks up from cwd and the exe dir (dev builds live under `target/…`, with
+/// `ecu/` at the workspace root) and matches the filename case-insensitively, so
+/// `KOMBI31.prg`/`D_0080.GRP` resolve on a case-sensitive (Linux) filesystem even
+/// when the catalog/variant name differs in case. Falls back to the plain relative
+/// path so `Session::open` still reports a clear error when the file is truly absent.
 fn resolve_prg(name: &str) -> PathBuf {
-    let rel = Path::new("ecu").join(name);
-    if rel.exists() {
-        return rel;
-    }
-    let mut bases: Vec<PathBuf> = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        bases.push(cwd);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            bases.push(dir.to_path_buf());
-        }
-    }
-    for base in bases {
-        let mut dir = Some(base.as_path());
-        while let Some(d) = dir {
-            let cand = d.join("ecu").join(name);
-            if cand.exists() {
-                return cand;
-            }
-            dir = d.parent();
-        }
-    }
-    rel // fall back to the relative path (Session::open will report a clear error)
+    crate::i18n::resolve_ci("ecu", name).unwrap_or_else(|| Path::new("ecu").join(name))
 }

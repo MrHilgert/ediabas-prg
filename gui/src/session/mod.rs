@@ -291,16 +291,12 @@ fn ensure_module(app: &mut App, m: &Module, _ctx: &egui::Context) {
     }
 }
 
-/// Resolve and parse `SGDAT/<script>.ipo` (case-insensitive extension).
+/// Resolve and parse `SGDAT/<script>.ipo`. The lookup is fully case-insensitive
+/// (name AND extension), so a catalog script `kombi` finds `KOMBI.IPO` on a
+/// case-sensitive (Linux) filesystem.
 fn load_ipo(script: &str) -> Option<ScreenModule> {
-    for ext in ["ipo", "IPO"] {
-        if let Some(path) = crate::i18n::resolve(&format!("SGDAT/{script}.{ext}")) {
-            if let Ok(sm) = inpa::parse(&path) {
-                return Some(sm);
-            }
-        }
-    }
-    None
+    let path = crate::i18n::resolve_ci("SGDAT", &format!("{script}.ipo"))?;
+    inpa::parse(&path).ok()
 }
 
 /// Drain worker events into app state.

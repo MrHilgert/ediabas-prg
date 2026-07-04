@@ -80,6 +80,24 @@ fn load_ini(rel: &str) -> HashMap<String, String> {
     map
 }
 
+/// Locate `<subdir>/<file>` case-insensitively. On Linux (case-sensitive FS) the
+/// staged ECU/SGDAT assets are often upper-case (`KOMBI.IPO`, `DDE40KW0.PRG`) while
+/// the catalog/script names are lower-case (`kombi`), so an exact path misses. Try
+/// the exact path first (fast, correct on Windows/macOS), then scan `<subdir>` for a
+/// filename that matches case-insensitively.
+pub fn resolve_ci(subdir: &str, file: &str) -> Option<PathBuf> {
+    if let Some(p) = resolve(&format!("{subdir}/{file}")) {
+        return Some(p);
+    }
+    let dir = resolve(subdir)?;
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        if entry.file_name().to_string_lossy().eq_ignore_ascii_case(file) {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
 /// Locate an external asset by walking up from cwd and the exe dir (like the ECU/SGDAT dirs).
 pub fn resolve(rel: &str) -> Option<PathBuf> {
     let direct = Path::new(rel);

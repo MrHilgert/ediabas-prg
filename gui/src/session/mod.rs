@@ -142,9 +142,61 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             }
         });
 
+    // Loading overlay while the link is coming up (resolve variant → INITIALISIERUNG
+    // → IDENT). Dims and blocks the session behind it until Connected/Error resolves.
+    connecting_modal(app, ctx, m.code);
+
     if let Some(a) = act.take() {
         apply(app, a);
     }
+}
+
+/// Full-screen "connecting…" overlay shown while `connect_pending`: a spinner over a
+/// dimmed, click-swallowing backdrop. Cleared automatically when the worker reports
+/// `Connected` (session fills) or `Error` (`status_msg` shows the reason).
+fn connecting_modal(app: &App, ctx: &egui::Context, code: &str) {
+    if !app.connect_pending {
+        return;
+    }
+    ctx.request_repaint(); // keep the spinner animating until the handshake resolves
+    let c = palette(app.theme);
+    let screen = ctx.screen_rect();
+
+    egui::Area::new(egui::Id::new("session_connect_backdrop"))
+        .order(egui::Order::Middle)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
+            ui.painter().rect_filled(rect, 0.0, egui::Color32::from_black_alpha(170));
+        });
+
+    let frame = egui::Frame::none()
+        .fill(c.panel)
+        .stroke(egui::Stroke::new(1.0, c.stroke2))
+        .rounding(6.0)
+        .inner_margin(egui::Margin::symmetric(30.0, 26.0));
+
+    egui::Window::new("session_connect_modal")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.set_width(300.0);
+            ui.vertical_centered(|ui| {
+                ui.add(egui::Spinner::new().size(30.0).color(c.accent));
+                ui.add_space(16.0);
+                ui.label(RichText::new(t("connecting", app.lang)).size(13.0).strong().color(c.fg));
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(format!("{code} · INITIALISIERUNG / IDENT"))
+                        .size(10.0)
+                        .color(c.fg_dim),
+                );
+            });
+        });
 }
 
 /// Should a menu item be shown at all? Hides empty labels and INPA infrastructure items

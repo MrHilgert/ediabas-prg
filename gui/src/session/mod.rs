@@ -69,6 +69,36 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     drain_worker(app);
     lifecycle(app, &m, &sm, ctx);
 
+    // Gate: a connectable ECU (real SGBD) must have a LIVE link before its session
+    // renders. While the handshake is in flight → loading modal only. If it finished
+    // WITHOUT a link → don't open a dead session: bounce back to ECU-select and show
+    // the reason there. ECUs without a transport (structure-only) skip the gate.
+    let connectable = m.prg.is_some() && !sm.sgbd.is_empty();
+    if connectable && app.connected != Some(m.code) {
+        header(app, ctx);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(c.bg))
+            .show(ctx, |_| {});
+        if app.connect_pending {
+            connecting_modal(app, ctx, m.code); // still handshaking — spinner
+        } else {
+            // Connect resolved with no link → surface the reason on ECU-select and
+            // return there; allow a fresh attempt.
+            if app.connect_error.is_none() {
+                let why = if app.status_msg.is_empty() {
+                    t("connect_failed", app.lang)
+                } else {
+                    app.status_msg.clone()
+                };
+                app.connect_error = Some(why);
+            }
+            app.connect_attempted = false;
+            app.screen = Screen::Ecu;
+            ctx.request_repaint();
+        }
+        return;
+    }
+
     // Current view (menu + optional screen).
     let view = app.nav.last().copied().unwrap_or(View { menu: sm.root, screen: None });
 
@@ -141,10 +171,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 });
             }
         });
-
-    // Loading overlay while the link is coming up (resolve variant → INITIALISIERUNG
-    // → IDENT). Dims and blocks the session behind it until Connected/Error resolves.
-    connecting_modal(app, ctx, m.code);
 
     if let Some(a) = act.take() {
         apply(app, a);

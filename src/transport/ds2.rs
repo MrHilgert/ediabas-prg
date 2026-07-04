@@ -21,6 +21,13 @@ use crate::error::{Error, Result};
 use crate::trace::trace;
 use super::Transport;
 
+/// FTDI/KDCAN-clone K-line floor. DS2 ECUs on this adapter need inter-byte spacing
+/// on TX or they never read the request (proven on DDE4.0, which declares 4 ms and
+/// works). Some SGBDs — instrument clusters (IKE, KOMBI39) and their group file
+/// D_0080 — declare `ParInterbyteTime = 0`, which is fine on a genuine interface but
+/// leaves this clone silent. Clamp the configured spacing up to this minimum.
+const DS2_MIN_INTERBYTE_MS: u64 = 5;
+
 pub struct Ds2Transport {
     driver: Box<dyn Driver>,
     /// true if the K-line adapter mirrors TX bytes back on RX (typical for single-wire K-line).
@@ -248,7 +255,9 @@ impl Transport for Ds2Transport {
         self.len_add = cfg.len_add;
         self.timeout_std_ms = cfg.timeout_std_ms;
         self.regen_time_ms = cfg.regen_time_ms;
-        self.interbyte_ms = cfg.interbyte_ms;
+        // Clamp up to the adapter's minimum: SGBDs that declare 0 spacing (clusters,
+        // D_0080) otherwise leave this KDCAN clone unanswered. See DS2_MIN_INTERBYTE_MS.
+        self.interbyte_ms = cfg.interbyte_ms.max(DS2_MIN_INTERBYTE_MS);
         self.driver.set_timeout(cfg.timeout_std_ms)
     }
 

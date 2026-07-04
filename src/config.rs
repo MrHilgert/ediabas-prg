@@ -118,6 +118,17 @@ mod tests {
     }
 }
 
+// EDIABAS "use default" fallbacks: a CommParameter field of 0 means "adopt the stack
+// default". These mirror EdiabasLib's built-in values so a .prg that leaves a timeout
+// blank behaves the same as it would under Windows EDIABAS.
+const DEFAULT_TIMEOUT_STD_MS: u64 = 2000;     // ParTimeoutStd
+const DEFAULT_REGEN_TIME_MS: u64 = 20;        // ParRegenTime (inter-telegram gap)
+const DEFAULT_TIMEOUT_TEL_KLINE_MS: u64 = 50; // ParTimeoutTelEnd — classic K-line (u16 concepts)
+const DEFAULT_TIMEOUT_TEL_FAST_MS: u64 = 20;  // ParTimeoutTelEnd — 32-bit concepts (FAST/D-CAN)
+const DEFAULT_RETRY_NR78: u32 = 3;            // ParRetryNr78 (7F..78 responsePending retries)
+const RETRY_NR78_SANITY_MAX: u32 = 100;       // reject an absurd parsed retry count
+const DEFAULT_TIMEOUT_NR78_MS: u64 = 3000;    // extended P2* while a 7F..78 is pending
+
 impl CommConfig {
     /// Parse an EDIABAS 18-byte CommParameter block (as passed to `xsetpar`) into
     /// a `CommConfig`. Layout (9× u16 LE):
@@ -187,9 +198,9 @@ impl CommConfig {
         cfg.parity         = parity;
         cfg.len_offset     = len_offset;
         cfg.len_add        = len_add;
-        cfg.timeout_std_ms = if timeout_std_ms > 0 { timeout_std_ms } else { 2000 };
-        cfg.regen_time_ms  = if regen_time_ms  > 0 { regen_time_ms  } else { 20 };
-        cfg.timeout_tel_ms = if timeout_tel_ms > 0 { timeout_tel_ms } else { 50 };
+        cfg.timeout_std_ms = if timeout_std_ms > 0 { timeout_std_ms } else { DEFAULT_TIMEOUT_STD_MS };
+        cfg.regen_time_ms  = if regen_time_ms  > 0 { regen_time_ms  } else { DEFAULT_REGEN_TIME_MS };
+        cfg.timeout_tel_ms = if timeout_tel_ms > 0 { timeout_tel_ms } else { DEFAULT_TIMEOUT_TEL_KLINE_MS };
         cfg.interbyte_ms   = interbyte_ms;
         // Element [2] is the ECU/wake address (e.g. 0xB8 on DDE). KWP1281's 5-baud
         // init needs it; DS2 ignores it.
@@ -238,12 +249,12 @@ impl CommConfig {
         cfg.parity          = parity;
         cfg.len_offset      = len_offset;
         cfg.len_add         = len_add;
-        cfg.timeout_std_ms  = if timeout_std_ms > 0 { timeout_std_ms } else { 2000 };
-        cfg.regen_time_ms   = if regen_time_ms  > 0 { regen_time_ms  } else { 20 };
-        cfg.timeout_tel_ms  = if timeout_tel_ms > 0 { timeout_tel_ms } else { 20 };
+        cfg.timeout_std_ms  = if timeout_std_ms > 0 { timeout_std_ms } else { DEFAULT_TIMEOUT_STD_MS };
+        cfg.regen_time_ms   = if regen_time_ms  > 0 { regen_time_ms  } else { DEFAULT_REGEN_TIME_MS };
+        cfg.timeout_tel_ms  = if timeout_tel_ms > 0 { timeout_tel_ms } else { DEFAULT_TIMEOUT_TEL_FAST_MS };
         cfg.interbyte_ms    = interbyte_ms;
-        cfg.retry_nr78      = if retry_nr78 > 0 && retry_nr78 < 100 { retry_nr78 } else { 3 };
-        cfg.timeout_nr78_ms = if timeout_nr78 > 0 { timeout_nr78 } else { 3000 };
+        cfg.retry_nr78      = if retry_nr78 > 0 && retry_nr78 < RETRY_NR78_SANITY_MAX { retry_nr78 } else { DEFAULT_RETRY_NR78 };
+        cfg.timeout_nr78_ms = if timeout_nr78 > 0 { timeout_nr78 } else { DEFAULT_TIMEOUT_NR78_MS };
         Some(cfg)
     }
 }
@@ -257,17 +268,17 @@ impl Default for CommConfig {
             parity:         serialport::Parity::Even,
             len_offset:     1,
             len_add:        0,
-            timeout_std_ms: 2000,
-            regen_time_ms:  20,
-            timeout_tel_ms: 50,
+            timeout_std_ms: DEFAULT_TIMEOUT_STD_MS,
+            regen_time_ms:  DEFAULT_REGEN_TIME_MS,
+            timeout_tel_ms: DEFAULT_TIMEOUT_TEL_KLINE_MS,
             // A clean CommConfig carries NO forced inter-byte spacing — that is a
             // property of a specific transport+adapter, not of the protocol. The DS2
             // transport re-imposes its KDCAN floor (`DS2_MIN_INTERBYTE_MS`) in
             // `configure()`, so this 0 never reaches a DS2 wire unclamped.
             interbyte_ms:   0,
             wake_addr:      None,
-            retry_nr78:     3,
-            timeout_nr78_ms: 3000,
+            retry_nr78:     DEFAULT_RETRY_NR78,
+            timeout_nr78_ms: DEFAULT_TIMEOUT_NR78_MS,
         }
     }
 }

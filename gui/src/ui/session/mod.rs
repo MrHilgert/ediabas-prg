@@ -178,7 +178,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 
 /// Should a menu item be shown at all? Hides empty labels and INPA infrastructure items
 /// (Select/Deselect = scriptselect, editor = callwin, Exit) — only real functions remain.
-fn displayable(it: &inpa::NavItem) -> bool {
+pub(crate) fn displayable(it: &inpa::NavItem) -> bool {
     !it.label.trim().is_empty()
         && !matches!(it.target, NavTarget::Exit | NavTarget::Script(_) | NavTarget::Other(_))
 }
@@ -209,6 +209,13 @@ fn render_menu(
     app: &App,
 ) {
     // Menu title is shown once, in the header (context_strip) — not repeated here.
+    // Guard against a level with no navigable items rendering as a blank page: show a
+    // placeholder. `go_back` skips such dead levels, so this is a last-resort safety net.
+    if items.is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new(t("no_menu_items", app.lang)).size(12.0).color(c.fg_faint));
+        return;
+    }
     for it in items {
         let label = tr_prg(&it.label, app.lang);
         if widgets::menu_row(ui, c, it.fkey as usize, &label, &it.target) {

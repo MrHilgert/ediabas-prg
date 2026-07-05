@@ -226,23 +226,49 @@ impl App {
     /// page stack first, only leaving to ECU-select when already at the root page.
     pub fn go_back(&mut self) {
         match self.screen {
-            // Hierarchical back (not history): first close an open screen (→ its menu
-            // list), then climb to the parent menu, then leave to ECU-select.
+            // Hierarchical back (LITERALLY one level up, NOT history): first close an open
+            // screen (→ its menu list), else pop to the parent menu, else leave to ECU-select.
             Screen::Session => {
-                if let Some(top) = self.nav.last_mut() {
-                    if top.screen.is_some() {
+                let closed_screen = match self.nav.last_mut() {
+                    Some(top) if top.screen.is_some() => {
                         top.screen = None;
+                        true
+                    }
+                    _ => false,
+                };
+                if !closed_screen {
+                    if self.nav.len() > 1 {
+                        self.nav.pop();
+                    } else {
+                        self.screen = Screen::Ecu;
                         return;
                     }
                 }
-                if self.nav.len() > 1 {
+                // Idempotent: never rest on a DEAD level — a menu with no navigable items and
+                // no open screen (an INPA infrastructure/leftover node) renders as a blank page
+                // with only the back control. Keep climbing through such levels automatically.
+                while self.nav.len() > 1 && self.view_dead(&self.nav[self.nav.len() - 1]) {
                     self.nav.pop();
-                } else {
-                    self.screen = Screen::Ecu;
+                }
+                if self.nav.first().is_some_and(|v| self.view_dead(v)) {
+                    self.screen = Screen::Ecu; // even the root is empty → leave the session
                 }
             }
             Screen::Ecu => self.screen = Screen::Chassis,
             Screen::Chassis => {}
+        }
+    }
+
+    /// A navigation level is "dead" when no screen is open AND its menu has no item worth
+    /// showing (all filtered out by [`crate::ui::session::displayable`], or the menu is gone).
+    /// Landing on such a level shows a blank page — [`go_back`] skips these.
+    fn view_dead(&self, view: &crate::ui::session::View) -> bool {
+        if view.screen.is_some() {
+            return false;
+        }
+        match self.module.as_ref().and_then(|sm| sm.as_menu(view.menu)) {
+            Some(menu) => !menu.items.iter().any(crate::ui::session::displayable),
+            None => true,
         }
     }
 

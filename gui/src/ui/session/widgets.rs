@@ -103,9 +103,28 @@ pub(super) fn context_strip(
     view: &View,
 ) {
     let lang = app.lang;
+    // Есть ли уровень выше: открытый экран закрывается в своё меню, либо в стеке есть родитель.
+    // Только тогда «← Назад» осмысленна (иначе шаг вверх = выход, для этого есть крошка ЭБУ).
+    let can_up = view.screen.is_some() || app.nav.len() > 1;
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.add_space(14.0);
+        // «← Назад» — буквально один уровень вверх по иерархии экранов (не history).
+        if can_up
+            && ui
+                .add(
+                    egui::Button::new(RichText::new(format!("← {}", t("back", lang))).size(11.0).color(c.fg))
+                        .fill(Color32::TRANSPARENT)
+                        .stroke(Stroke::new(1.0, c.accent)),
+                )
+                .clicked()
+        {
+            app.go_back();
+        }
+        if can_up {
+            ui.add_space(6.0);
+        }
+        // «‹ выбор ЭБУ» — крошка-выход из сессии целиком (не шаг вверх).
         if ui
             .add(
                 egui::Button::new(RichText::new(format!("‹ {}", t("ecu_selection", lang))).size(11.0).color(c.fg_dim))

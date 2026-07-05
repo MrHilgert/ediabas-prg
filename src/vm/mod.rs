@@ -848,8 +848,13 @@ impl Vm {
                     ip = self.jump_target(ip, 6, off, code.len())?;
                 }
 
-                // etag — end-tag (conditional jump, treat as no-op skip): 41 70 OFF...
-                [0x41, 0x70, _, _, _, _, ..] => { ip += 6; }
+                // etag (0x41) — result-block tag: `[41][mode][Imm32 offset][ImmStr name]`.
+                // Marks a block that produces the named result; the caller's result filter
+                // would jump past it when the result isn't requested. We request all results,
+                // so we always fall through (execute the block) — that's exactly what skipping
+                // the etag instruction itself does. `skip_instr` sizes every mode (incl. the
+                // ImmStr name in mode 0x78) correctly, so no desync.
+                [0x41, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); }
 
                 // ── push / pop ────────────────────────────────────────────────
 

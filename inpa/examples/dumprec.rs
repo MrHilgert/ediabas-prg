@@ -62,6 +62,11 @@ fn main() {
             }
             tag::ITEM => {
                 println!("  ITEM#{} str2={:?}", r.item_no(), r.str2);
+                if let Some(code) = r.code() {
+                    for call in inpa::extract::dbg_calls(code, consts) {
+                        println!("      {call}");
+                    }
+                }
             }
             tag::CODE => {
                 let n = r.code().map(|c| c.len()).unwrap_or(0);

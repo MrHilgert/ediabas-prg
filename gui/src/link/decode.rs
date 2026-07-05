@@ -102,7 +102,29 @@ pub fn decode_live(fr: &JobResult, screen: &Screen) -> MeasFrame {
         cells.push(cell);
     }
     let raw_names = fr.sets().iter().flat_map(|s| s.names()).map(|n| n.to_string()).collect();
-    MeasFrame { cells, raw_names }
+    // Авто-дамп: экраны с feeder-джобом, но без display-строк (ident/status) — INPA сам
+    // выводит весь результат-сет. Собираем все пары имя→значение (первое вхождение), кроме
+    // служебного JOB_STATUS; стабильный порядок по имени (map не упорядочен).
+    let dump = if screen.rows.is_empty() && screen.feeder.is_some() {
+        let mut seen = std::collections::HashSet::new();
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for set in fr.sets() {
+            for (name, val) in set.iter() {
+                if name.eq_ignore_ascii_case("JOB_STATUS") || !seen.insert(name.to_string()) {
+                    continue;
+                }
+                let value = val.to_string().trim().to_string();
+                if !value.is_empty() {
+                    pairs.push((name.to_string(), value));
+                }
+            }
+        }
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        pairs
+    } else {
+        Vec::new()
+    };
+    MeasFrame { cells, raw_names, dump }
 }
 
 fn fmt_uw(v: f64) -> String {

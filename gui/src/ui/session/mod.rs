@@ -391,7 +391,12 @@ fn update_textinfo(app: &mut App, m: &Module, sm: &ScreenModule, view: &View) {
         app.info_for = None; // left the TextInfo screen — re-read on next open
         return;
     };
-    let has_rows = sm.as_screen(sid).map(|sc| !sc.rows.is_empty()).unwrap_or(false);
+    // Читаем, если у экрана есть display-строки ИЛИ feeder-джоб: ident/status без строк
+    // (`s_ident`) полагаются на авто-дамп всего результат-сета джоба (см. decode.rs).
+    let fetchable = sm
+        .as_screen(sid)
+        .map(|sc| !sc.rows.is_empty() || sc.feeder.is_some())
+        .unwrap_or(false);
     let no_data = app.live.as_ref().map_or(true, |f| !f.has_data());
     if app.info_for != Some(sid) {
         // A new TextInfo screen just opened → clear stale state and fetch this one once.
@@ -400,12 +405,12 @@ fn update_textinfo(app: &mut App, m: &Module, sm: &ScreenModule, view: &View) {
         app.info_busy = false;
         app.live = None;
         app.status_msg.clear();
-        if has_rows {
+        if fetchable {
             app.worker.send(Intent::OpenInfo(sid));
             app.info_busy = true;
             app.info_tries = 1;
         }
-    } else if has_rows && no_data && !app.info_busy && app.info_tries < 3 {
+    } else if fetchable && no_data && !app.info_busy && app.info_tries < 3 {
         // The previous read finished without data (a transient timeout on the stream→job
         // transition can eat the first request) → retry, up to a small cap.
         app.worker.send(Intent::OpenInfo(sid));

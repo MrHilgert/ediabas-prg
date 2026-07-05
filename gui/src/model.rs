@@ -37,6 +37,10 @@ pub struct MeasFrame {
     /// Имена результатов, реально пришедшие с ЭБУ — для диагностики пустого ответа
     /// (TextInfo показывает их, если ни одно имя не совпало).
     pub raw_names: Vec<String>,
+    /// Авто-дамп всех результатов feeder-джоба (пары имя→значение) для экранов БЕЗ
+    /// display-строк — ident/status: у них `screen.rows` пуст, а INPA выводит весь набор
+    /// результатов джоба целиком. Заполняется декодом только для таких экранов.
+    pub dump: Vec<(String, String)>,
 }
 
 impl MeasFrame {
@@ -46,7 +50,7 @@ impl MeasFrame {
     }
     /// Есть ли хоть одно осмысленное значение (иначе — «нет данных»).
     pub fn has_data(&self) -> bool {
-        self.cells.iter().any(|c| c.num.is_some() || c.text.is_some())
+        !self.dump.is_empty() || self.cells.iter().any(|c| c.num.is_some() || c.text.is_some())
     }
 }
 

@@ -381,6 +381,18 @@ pub(super) fn textinfo(
         }
         return;
     }
+    // Авто-дамп результатов feeder-джоба: экраны ident/status без display-строк — INPA
+    // выводит весь набор результатов, у нас `rows` пуст. Рисуем как обычные info-строки.
+    if let Some(f) = live.filter(|f| !f.dump.is_empty()) {
+        for (name, value) in &f.dump {
+            let line = inpa::InfoLine {
+                label: name.clone(),
+                value: inpa::InfoValue::Const(value.clone()),
+            };
+            info_row(ui, c, &line, lang);
+        }
+        return;
+    }
     // Data page (ident / coding): surface why it's empty rather than showing silent dashes.
     let have_data = live.is_some_and(|f| f.has_data());
     if !have_data {

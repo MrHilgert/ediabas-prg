@@ -33,6 +33,18 @@ pub(crate) fn kind_from_name(name: &str) -> ScreenKind {
     }
 }
 
+/// Diagnostic: dump a code body's recovered call sites (target + args) as strings — used by
+/// the `dumprec` example for `.ipo` reverse-engineering (which builtins/procs a screen calls).
+pub fn dbg_calls(code: &[u8], consts: &[crate::record::Const]) -> Vec<String> {
+    eval::call_sites(code, consts)
+        .iter()
+        .map(|cs| {
+            let args: Vec<String> = cs.args.iter().map(|a| format!("{a:?}")).collect();
+            format!("{:?}  {}", cs.target, args.join(", "))
+        })
+        .collect()
+}
+
 /// Convenience: how many screens/menus the model holds (for diagnostics/tests).
 pub fn counts(m: &ScreenModule) -> (usize, usize) {
     let mut menus = 0;

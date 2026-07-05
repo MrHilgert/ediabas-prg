@@ -169,3 +169,15 @@ mod tests {
         assert_eq!(out, "% Скважность", "de-ru.tsv not loaded or key not matched (out={out:?})");
     }
 }
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::tr_prg;
+    use crate::lang::Lang;
+    #[test]
+    fn overlay_fault_strings_translate() {
+        assert_eq!(tr_prg("Lichtmodul-EEPROM-Fehler", Lang::Ru), "Ошибка EEPROM модуля света");
+        assert_eq!(tr_prg("Fehler aufgetreten bei", Lang::Ru), "Неисправность возникла при пробеге");
+        assert_eq!(tr_prg("Gong_1", Lang::En), "Gong 1");
+    }
+}

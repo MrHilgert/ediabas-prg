@@ -95,8 +95,34 @@ fn is_code_identifier(t: &str) -> bool {
     false
 }
 
-/// Classify a raw cell/field value. Only `Text` is translated.
+/// Classify a raw value from a generic (non-displayed) source — strict identifier filter.
 fn classify(raw: &str) -> Kind {
+    classify_cat(raw, Cat::Other)
+}
+
+/// Softer code test for DISPLAYED fault text: a Capitalised German-noun start (`Gong`,
+/// `Lichtmodul…`) or a multi-word / hyphenated compound (`Tank-Hebelgeber_1`, `Fehler
+/// aufgetreten bei`, `DDE-Hauptrelais`) is real text — keep it. Otherwise fall back to the
+/// strict identifier test, which still drops lowercase-first camelCase codes (`admADF`).
+fn is_code_like_for_display(t: &str) -> bool {
+    let mut ch = t.chars();
+    if let (Some(a), Some(b)) = (ch.next(), ch.next()) {
+        if a.is_uppercase() && b.is_ascii_lowercase() {
+            return false; // German-noun start → keep
+        }
+    }
+    if t.contains(' ') || t.contains('-') {
+        return false; // multi-word / hyphenated compound → keep
+    }
+    is_code_identifier(t)
+}
+
+/// Classify a raw cell/field value. Only `Text` is translated. `cat` is the column's GUI
+/// category: **displayed** fault/detail columns keep identifier-LOOKING German text
+/// (`Gong_1`, `Tank-Hebelgeber_1`, `Lichtmodul-EEPROM-Fehler`, mileage labels) — these are
+/// real names shown to the user; only the generic corpus dump (`Cat::Other`) applies the
+/// strict code-identifier filter that would otherwise drop them.
+fn classify_cat(raw: &str, cat: Cat) -> Kind {
     let t = raw.trim();
     if t.len() < 2 || t.len() > 200 {
         return Kind::Skip;
@@ -106,7 +132,7 @@ fn classify(raw: &str) -> Kind {
         return Kind::Skip; // pure numbers / hex / symbols / separators
     }
     // Pure identifier / communication keyword: A-Z, digits, underscore only.
-    // (JOB_STATUS, OKAY, STAT_DREHZAHL_WERT, ...)
+    // (JOB_STATUS, OKAY, STAT_DREHZAHL_WERT, ...) — never display text, drop in any category.
     if t.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
         return Kind::Skip;
     }
@@ -114,8 +140,17 @@ fn classify(raw: &str) -> Kind {
     if is_unit(t) {
         return Kind::Unit;
     }
-    // Code identifiers leaking through as mixed-case tokens.
-    if is_code_identifier(t) {
+    // Hex literals are code in every category (a fault column may carry `0x..` raw codes).
+    if t.to_ascii_lowercase().strip_prefix("0x").is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_hexdigit())) {
+        return Kind::Skip;
+    }
+    // Displayed FAULT columns (DTC names, descriptions, freeze-frame labels) keep German
+    // words even when they carry digits/caps/hyphens (`Gong_1`, `Lichtmodul-EEPROM-Fehler`,
+    // `Fehler aufgetreten bei`) — they ARE the shown text; only clear code (lowercase-first
+    // camelCase like `admADF`, hex, vowel-less) is dropped. Detail/generic columns stay strict
+    // (they leak adaptation-variable codes like `admLMM` otherwise).
+    let is_code = if cat == Cat::Fault { is_code_like_for_display(t) } else { is_code_identifier(t) };
+    if is_code {
         return Kind::Skip;
     }
     let has_lower = t.chars().any(|c| c.is_ascii_lowercase() || matches!(c, 'ä' | 'ö' | 'ü' | 'ß'));
@@ -220,11 +255,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let t = &tables[tname];
             // Which columns hold any translatable text? Emit those, per column.
             for (ci, col) in t.columns.iter().enumerate() {
+                let cat = col_category(col);
                 let mut col_text: BTreeSet<String> = BTreeSet::new();
                 let mut col_units: BTreeSet<String> = BTreeSet::new();
                 for row in &t.rows {
                     let Some(cell) = row.get(ci) else { continue };
-                    match classify(cell) {
+                    match classify_cat(cell, cat) {
                         Kind::Text => {
                             col_text.insert(cell.trim().to_string());
                         }
@@ -240,7 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = writeln!(body, "{s}");
                     }
                     let _ = writeln!(body);
-                    match col_category(col) {
+                    match cat {
                         Cat::Detail => gui_details.extend(col_text.iter().cloned()),
                         Cat::Fault => gui_faults.extend(col_text.iter().cloned()),
                         Cat::Other => {}

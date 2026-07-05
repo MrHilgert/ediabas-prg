@@ -375,14 +375,9 @@ pub(super) fn textinfo(
 ) {
     // An ftextout-only screen (e.g. `s_info`) has no job-bound rows — render its static
     // "about the SGBD" lines instead.
-    if rows.is_empty() && !info.is_empty() {
-        for line in info {
-            info_row(ui, c, line, lang);
-        }
-        return;
-    }
     // Авто-дамп результатов feeder-джоба: экраны ident/status без display-строк — INPA
-    // выводит весь набор результатов, у нас `rows` пуст. Рисуем как обычные info-строки.
+    // выводит весь набор результатов, у нас `rows` пуст. Приоритет над статическим info
+    // (это живые данные джоба, а не «о SGBD»). Рисуем как обычные info-строки.
     if let Some(f) = live.filter(|f| !f.dump.is_empty()) {
         for (name, value) in &f.dump {
             let line = inpa::InfoLine {
@@ -390,6 +385,12 @@ pub(super) fn textinfo(
                 value: inpa::InfoValue::Const(value.clone()),
             };
             info_row(ui, c, &line, lang);
+        }
+        return;
+    }
+    if rows.is_empty() && !info.is_empty() {
+        for line in info {
+            info_row(ui, c, line, lang);
         }
         return;
     }

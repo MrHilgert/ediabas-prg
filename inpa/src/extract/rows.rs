@@ -102,6 +102,10 @@ fn build_info(entries: &[Option<String>], title: &str) -> Vec<InfoLine> {
             i += 1; // stray separator or runtime value with no preceding label
             continue;
         };
+        if !looks_like_label(s) {
+            i += 1; // INPA infrastructure constant (import signature / format string) — skip
+            continue;
+        }
         let label = s.trim().to_string();
         let mut j = i + 1;
         let had_sep = matches!(entries.get(j), Some(Some(x)) if x.trim() == ":");
@@ -138,6 +142,26 @@ fn build_info(entries: &[Option<String>], title: &str) -> Vec<InfoLine> {
         i = j;
     }
     out
+}
+
+/// Whether `s` reads as a human display label rather than an INPA infrastructure constant.
+/// `ftextout` operands include DLL-import signatures (`user32::CharLowerA`) and printf-style
+/// format strings (`c.s%S`) that must NOT leak into visible field labels. A real label has a
+/// letter and neither a `::` module path nor a `%<letter>` format token.
+fn looks_like_label(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() || t.contains("::") {
+        return false;
+    }
+    let bytes = t.as_bytes();
+    let has_fmt = bytes
+        .iter()
+        .enumerate()
+        .any(|(i, &b)| b == b'%' && bytes.get(i + 1).is_some_and(u8::is_ascii_alphabetic));
+    if has_fmt {
+        return false;
+    }
+    t.chars().any(char::is_alphabetic)
 }
 
 /// Build a [`Row`] from an `ergebnis*` helper call, if `name` is a recognised helper.
@@ -208,4 +232,24 @@ fn last_str(args: &[Val]) -> Option<&str> {
 fn clean_unit(u: Option<&String>) -> String {
     u.map(|s| s.trim().trim_start_matches('[').trim_end_matches(']').trim().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_label;
+
+    #[test]
+    fn label_filter_rejects_infra_constants() {
+        // Real labels pass.
+        assert!(looks_like_label("Rail-pressure"));
+        assert!(looks_like_label("Давление в рампе"));
+        assert!(looks_like_label("Duty 50%")); // trailing % (no format letter) is fine
+        // INPA infrastructure / format-string leaks are rejected.
+        assert!(!looks_like_label("user32::CharLowerA:c.s%S"));
+        assert!(!looks_like_label("c.s%S"));
+        assert!(!looks_like_label("%d"));
+        assert!(!looks_like_label("kernel32::GetProcAddress"));
+        assert!(!looks_like_label(""));
+        assert!(!looks_like_label("---")); // punctuation-only, no letter
+    }
 }

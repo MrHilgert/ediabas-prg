@@ -255,14 +255,10 @@ fn render_screen(
 
 /// Turn a menu item into the action it triggers.
 pub(super) fn item_action(sm: &ScreenModule, app: &App, view: &View, it: &inpa::NavItem) -> Option<Act> {
-    // Resolve the generic base screen to its variant sibling for the connected SGBD (INPA data
-    // items store the generic; the variant, e.g. `_d40m57a1` with `_IST_WERT` names, is chosen
-    // by the ECU actually opened). No-op when there is no variant sibling (base ECU).
-    let variant_of = |s: usize| sm.screen_for_variant(s, &app.connected_variant);
     match &it.target {
-        NavTarget::Screen(s) => Some(Act::Open(View { menu: view.menu, screen: Some(variant_of(*s)) })),
+        NavTarget::Screen(s) => Some(Act::Open(View { menu: view.menu, screen: Some(*s) })),
         NavTarget::ScreenAndMenu { screen, menu } => {
-            Some(Act::Open(View { menu: *menu, screen: Some(variant_of(*screen)) }))
+            Some(Act::Open(View { menu: *menu, screen: Some(*screen) }))
         }
         NavTarget::Menu(mn) => Some(Act::Open(View { menu: *mn, screen: None })),
         NavTarget::Job(j) => {

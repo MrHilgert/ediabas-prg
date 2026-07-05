@@ -50,25 +50,6 @@ impl ScreenModule {
             _ => None,
         }
     }
-
-    /// Resolve a screen to its variant-specific sibling for `variant` (the connected SGBD),
-    /// per INPA's convention `<name>_<variant lowercased>` — e.g. `s_analog1` + `D40M57A1` →
-    /// `s_analog1_d40m57a1`. Data items store the generic base screen; the concrete variant
-    /// (whose result names may differ, e.g. `_IST_WERT` vs `_WERT`) is chosen here at open
-    /// time so the polled names match the ECU actually opened. Falls back to `id` when there
-    /// is no such sibling (base ECU) or `variant` is empty.
-    pub fn screen_for_variant(&self, id: NodeId, variant: &str) -> NodeId {
-        let variant = variant.trim();
-        if variant.is_empty() {
-            return id;
-        }
-        let Some(base) = self.as_screen(id) else { return id };
-        let want = format!("{}_{}", base.name, variant).to_ascii_lowercase();
-        self.nodes
-            .iter()
-            .position(|n| matches!(n, Node::Screen(s) if s.name.eq_ignore_ascii_case(&want)))
-            .unwrap_or(id)
-    }
 }
 
 /// A node in the page tree.

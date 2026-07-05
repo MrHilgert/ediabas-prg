@@ -89,14 +89,13 @@ fn dde40_bindings() {
 }
 
 #[test]
-fn dde40_variant_screen_resolution() {
+fn dde40_data_item_targets_variant_screen() {
     let path = dde40();
     if !path.exists() {
         eprintln!("skip: {} not present (gitignored corpus)", path.display());
         return;
     }
     let m = inpa::parse(&path).expect("parse DDE40");
-    // The data menu item stores the GENERIC base screen (first SETSCREEN).
     let m_status = m
         .nodes
         .iter()
@@ -105,23 +104,17 @@ fn dde40_variant_screen_resolution() {
             _ => None,
         })
         .expect("m_status menu");
-    let analog1_id = m_status
+    // A data item issues two SETSCREENs (generic then variant override); INPA renders the LAST.
+    // The variant screen is the one the ECU actually answers (different jobs) — "Аналог #1" must
+    // resolve to `s_analog1_d40m57a1`, not the generic `s_analog1`.
+    let analog1 = m_status
         .items
         .iter()
-        .find_map(|it| match &it.target {
-            NavTarget::Screen(s) if m.as_screen(*s).is_some_and(|sc| sc.name.eq_ignore_ascii_case("s_analog1")) => {
-                Some(*s)
-            }
+        .find(|it| it.label.contains("Аналог #1") || it.label.contains("nalog #1"))
+        .and_then(|it| match &it.target {
+            NavTarget::Screen(s) => m.as_screen(*s).map(|sc| sc.name.clone()),
             _ => None,
         })
-        .expect("Аналог #1 → generic s_analog1");
-
-    // A base ECU keeps the generic screen; the M57 variant resolves to its `_d40m57a1` sibling.
-    assert_eq!(m.screen_for_variant(analog1_id, "DDE40KW0"), analog1_id, "base ECU → generic");
-    let variant_id = m.screen_for_variant(analog1_id, "D40M57A1");
-    assert_eq!(
-        m.as_screen(variant_id).map(|s| s.name.as_str()),
-        Some("s_analog1_d40m57a1"),
-        "M57 variant → variant screen"
-    );
+        .expect("Аналог #1 → a screen");
+    assert_eq!(analog1, "s_analog1_d40m57a1", "data item resolves to the variant screen (last SETSCREEN)");
 }

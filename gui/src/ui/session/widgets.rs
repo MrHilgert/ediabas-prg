@@ -221,6 +221,12 @@ pub(super) fn stream(
         .collect();
     let rows2: Vec<&[Cell]> = cells_per_group.iter().flat_map(|c| c.chunks(2)).collect();
     if rows2.is_empty() {
+        // Экран без измеряемых строк (напр. LWR status идёт через мастер-LCM и не отдаёт
+        // поток) — не оставляем пустоту: честно говорим, что показывать тут нечего.
+        ui.add_space(28.0);
+        ui.vertical_centered(|ui| {
+            ui.label(RichText::new(t("no_screen_data", lang)).size(13.0).color(c.fg_dim));
+        });
         return;
     }
     // Bars keep a FIXED height; the leftover space is spread as equal gaps *between* rows,

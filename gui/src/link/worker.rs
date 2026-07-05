@@ -285,60 +285,91 @@ fn poll_reqs(screen: &inpa::Screen) -> Vec<(String, String)> {
 
 // ------------------------------------------------------------------- connect --
 
+/// Один SGBD-кандидат на открытие. `group_proven` = групповой `IDENTIFIKATION` уже получил
+/// реальный ответ с СОБСТВЕННОГО wake-адреса этого варианта, т.е. блок доказанно на шине —
+/// даже если его личный IDENT не умеет само-опроситься (идёт через мастер-ЭБУ, как LWR2A
+/// через LCM). Фолбэк-SGBD из `.ipo` — всегда `group_proven=false` (его никто не подтверждал).
+struct Candidate {
+    prg: String,
+    group_proven: bool,
+}
+
 /// Открыть сессию для ЭБУ, названного `.ipo`-скриптом. Разбирает `.ipo` (→ SGBD и
-/// address-keyed группы), собирает SGBD-кандидатов и открывает ПЕРВОГО, кто реально
-/// присутствует на шине (доказано IDENT-джобом), а не первого «опознанного». Возвращает
-/// сессию и разобранную модель экранов (для последующего опроса/декода).
+/// address-keyed группы), собирает SGBD-кандидатов и выбирает ЛУЧШЕГО присутствующего:
+/// сперва тот, кто сам ответил на IDENT (`probe`-proven); если такого нет — тот, чьё
+/// присутствие уже доказала группа (`group_proven`). Возвращает сессию и модель экранов.
 ///
-/// Присутствие — арбитр выбора: неверный/несуществующий вариант, чужой концепт или пустой
-/// фолбэк отбрасываются, а не принимаются вслепую. Так порядок групп в `.ipo` перестаёт
-/// быть фатальным, а `sgbd=""` не превращается в `open(".prg")`.
+/// Так неверный/несуществующий вариант, чужой концепт или пустой фолбэк отбрасываются, а
+/// LWR-класс (IDENT через мастер-ЭБУ) всё же коннектится. Порт один — держим не больше одной
+/// открытой сессии; поэтому найденный `group_proven` держим открытым как запасной и роняем
+/// только ради попытки следующего кандидата.
 fn connect(port: &str, script: &str) -> Result<(Session, ScreenModule), ConnReason> {
     let sm = load_ipo(script)
         .ok_or_else(|| ConnReason::Other(format!("не удалось разобрать .ipo для {script}")))?;
     let port = resolve_port(port);
-
-    // Кандидаты в порядке приоритета INPA: варианты, опознанные группами `.ipo`, затем
-    // непустой фолбэк-SGBD из `.ipo` (дедуп сохраняет порядок).
     let candidates = collect_candidates(&port, &sm);
 
-    // Сбой ОТКРЫТИЯ ПОРТА (нет адаптера / занят) — не «ЭБУ молчит»: запоминаем, чтобы
-    // вернуть осмысленную причину, если ни один кандидат не откроется.
+    // Решение (какой .prg победит) — см. чистую `select_present`; здесь тот же контракт, но
+    // с одним открытием на кандидата (без повторного INITIALISIERUNG — у LWR это физический
+    // тест фар). `held` — открытая group_proven-сессия, `held_name` — её имя для редкого
+    // переоткрытия, если пришлось уронить ради следующего кандидата.
+    let mut held: Option<Session> = None;
+    let mut held_name: Option<String> = None;
+    // Сбой ОТКРЫТИЯ ПОРТА (нет адаптера / занят) — не «ЭБУ молчит»: важнее «нет ответа».
     let mut port_err: Option<ConnReason> = None;
-    let picked = pick_present(&candidates, |cand| {
-        let prg_path = resolve_prg(cand);
+
+    for cand in &candidates {
+        let prg_path = resolve_prg(&cand.prg);
         if !prg_path.exists() {
-            return None;
+            continue;
         }
+        held = None; // один порт — отпускаем прежнюю сессию перед новым открытием
         let mut s = match Session::open(&port, BAUD, &prg_path) {
             Ok(s) => s,
             Err(e) => {
                 port_err = Some(classify_open(e));
-                return None;
+                continue;
             }
         };
-        // DS2 INITIALISIERUNG лишь настраивает параметры локально (xsetpar/xawlen) —
-        // телеграмму не шлёт, поэтому «успешна» даже при пустой шине. Присутствие ЭБУ
-        // доказываем реальным IDENT-джобом: не ответил ⇒ это не тот SGBD / модуль молчит.
         if s.initialize().is_err() {
-            return None;
+            continue;
         }
-        s.probe_presence().is_ok().then_some(s)
-    });
-
-    match picked {
-        Some(s) => Ok((s, sm)),
-        // Ни один кандидат не присутствует: ошибка адаптера важнее «нет ответа».
-        None => Err(port_err.unwrap_or(ConnReason::NoResponse)),
+        // DS2 INITIALISIERUNG лишь настраивает параметры локально — присутствие доказываем
+        // реальным IDENT-джобом. Ответил сам → это лучший кандидат, берём немедленно.
+        if s.probe_presence().is_ok() {
+            return Ok((s, sm));
+        }
+        // Сам не ответил, но группа уже видела его wake-адрес → держим как запасной.
+        if cand.group_proven {
+            if held_name.is_none() {
+                held_name = Some(cand.prg.clone());
+            }
+            held = Some(s);
+        }
     }
+
+    // Ни один не прошёл IDENT. Принять group_proven (группа доказала присутствие).
+    if let Some(s) = held {
+        return Ok((s, sm)); // ещё открыт (был последним кандидатом) — без переоткрытия
+    }
+    if let Some(name) = held_name {
+        // group_proven был уронён ради следующего (тоже неудачного) кандидата — переоткрыть.
+        if let Ok(mut s) = Session::open(&port, BAUD, &resolve_prg(&name)) {
+            if s.initialize().is_ok() {
+                return Ok((s, sm));
+            }
+        }
+    }
+    Err(port_err.unwrap_or(ConnReason::NoResponse))
 }
 
 /// Собрать SGBD-кандидатов в порядке приоритета INPA: сперва варианты, опознанные
 /// групповыми файлами `.ipo` (`D_<ADDR>.GRP` → `IDENTIFIKATION` → `VARIANTE`) в порядке
-/// перечисления, затем непустой фолбэк-SGBD из `.ipo`. Имена — `<name>.prg`, дедуп с
-/// сохранением порядка. Отсутствующий/не опознавший групповой файл просто не даёт кандидата.
-fn collect_candidates(port: &str, sm: &ScreenModule) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+/// перечисления, затем непустой фолбэк-SGBD из `.ipo`. Дедуп по имени с сохранением порядка.
+/// Для каждого варианта помечаем `group_proven`: ответил ли его собственный wake-адрес среди
+/// адресов, откликнувшихся группе при опознании.
+fn collect_candidates(port: &str, sm: &ScreenModule) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = Vec::new();
     for g in &sm.group_files {
         let grp_path = resolve_prg(&format!("{g}.GRP"));
         if !grp_path.exists() {
@@ -346,38 +377,52 @@ fn collect_candidates(port: &str, sm: &ScreenModule) -> Vec<String> {
         }
         let identified = Session::open(port, BAUD, &grp_path).and_then(|mut s| {
             s.initialize()?;
-            s.identify_variant()
+            let variant = s.identify_variant()?;
+            Ok((variant, s.responders()))
         });
-        if let Ok(Some(variant)) = identified {
-            let name = format!("{variant}.prg");
-            if !out.contains(&name) {
-                out.push(name);
+        if let Ok((Some(variant), responders)) = identified {
+            let prg = format!("{variant}.prg");
+            if !out.iter().any(|c| c.prg == prg) {
+                let group_proven =
+                    variant_wake(&prg).is_some_and(|w| responders.contains(&w));
+                out.push(Candidate { prg, group_proven });
             }
         }
     }
     if !sm.sgbd.is_empty() {
-        let name = format!("{}.prg", sm.sgbd);
-        if !out.contains(&name) {
-            out.push(name);
+        let prg = format!("{}.prg", sm.sgbd);
+        if !out.iter().any(|c| c.prg == prg) {
+            out.push(Candidate { prg, group_proven: false });
         }
     }
     out
 }
 
-/// Выбрать первого присутствующего кандидата: для каждого непустого имени в порядке
-/// приоритета вызвать `try_open`; вернуть первый `Some` (в боевом пути — открытую сессию,
-/// доказавшую присутствие). Пустые имена пропускаются, `try_open` для них не вызывается.
-/// Чистая логика выбора — тестируется без железа.
-fn pick_present<T>(candidates: &[String], mut try_open: impl FnMut(&str) -> Option<T>) -> Option<T> {
-    for cand in candidates {
-        if cand.is_empty() {
-            continue;
-        }
-        if let Some(v) = try_open(cand) {
-            return Some(v);
+/// Статически прочитать wake-адрес варианта из его `.prg` (CommParameter), без I/O к ЭБУ.
+fn variant_wake(prg: &str) -> Option<u8> {
+    ediabas::PrgFile::open(&resolve_prg(prg)).ok()?.initial_comm_config()?.wake_addr
+}
+
+/// Чистый контракт выбора (тестируется без железа): первый `Present`; иначе первый
+/// `GroupOnly`; иначе `None`. `connect` реализует ровно это, но с одним открытием сессии.
+#[cfg_attr(not(test), allow(dead_code))]
+enum Probe {
+    Present,
+    GroupOnly,
+    Absent,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn select_present(cands: &[Candidate], probe: impl Fn(&Candidate) -> Probe) -> Option<String> {
+    let mut group_only: Option<&Candidate> = None;
+    for c in cands {
+        match probe(c) {
+            Probe::Present => return Some(c.prg.clone()),
+            Probe::GroupOnly if group_only.is_none() => group_only = Some(c),
+            _ => {}
         }
     }
-    None
+    group_only.map(|c| c.prg.clone())
 }
 
 /// Разобрать `SGDAT/<script>.ipo` (регистронезависимо по имени и расширению).
@@ -419,21 +464,41 @@ mod tests {
         assert!(matches!(classify_open(Error::Vm("x".into())), ConnReason::Other(_)));
     }
 
-    #[test]
-    fn pick_present_takes_first_present_skips_absent_and_empty() {
-        let cands = vec!["KOMBI31.prg".to_string(), String::new(), "IKE.prg".to_string()];
-        // Присутствует только верный вариант IKE; неверный фолбэк KOMBI31 отклоняется
-        // присутствием, пустой кандидат вовсе не пробуется.
-        let picked = pick_present(&cands, |c| (c == "IKE.prg").then(|| c.to_string()));
-        assert_eq!(picked.as_deref(), Some("IKE.prg"));
+    fn cand(prg: &str, group_proven: bool) -> Candidate {
+        Candidate { prg: prg.to_string(), group_proven }
+    }
 
-        // Никто не присутствует → None; пустое имя не передаётся в проверку.
-        let mut probed: Vec<String> = Vec::new();
-        let none = pick_present(&cands, |c| {
-            probed.push(c.to_string());
-            None::<()>
+    #[test]
+    fn select_prefers_probe_present_over_group_and_absent() {
+        // KMB: неверный вариант KOMBI32 (не group_proven) отклоняется, фолбэк IKI отвечает сам.
+        let kmb = [cand("KOMBI32.prg", false), cand("IKI.prg", false)];
+        let picked = select_present(&kmb, |c| match c.prg.as_str() {
+            "IKI.prg" => Probe::Present,
+            _ => Probe::Absent,
         });
+        assert_eq!(picked.as_deref(), Some("IKI.prg"));
+
+        // LCM: вариант LCM_III присутствует по группе, но его IDENT молчит; фолбэк LCM
+        // отвечает сам → probe-proven важнее group-proven.
+        let lcm = [cand("LCM_III.prg", true), cand("LCM.prg", false)];
+        let picked = select_present(&lcm, |c| match c.prg.as_str() {
+            "LCM.prg" => Probe::Present,
+            "LCM_III.prg" => Probe::GroupOnly,
+            _ => Probe::Absent,
+        });
+        assert_eq!(picked.as_deref(), Some("LCM.prg"));
+    }
+
+    #[test]
+    fn select_accepts_group_proven_when_no_probe_present() {
+        // LWR: единственный кандидат LWR2A сам не отвечает (IDENT через LCM), но группа
+        // достучалась до его адреса → принимаем по группе.
+        let lwr = [cand("LWR2A.prg", true)];
+        let picked = select_present(&lwr, |_| Probe::GroupOnly);
+        assert_eq!(picked.as_deref(), Some("LWR2A.prg"));
+
+        // Никто не присутствует и не подтверждён группой → None.
+        let none = select_present(&lwr, |_| Probe::Absent);
         assert!(none.is_none());
-        assert_eq!(probed, vec!["KOMBI31.prg".to_string(), "IKE.prg".to_string()]);
     }
 }

@@ -208,4 +208,13 @@ impl Session {
     pub fn last_response_at(&self) -> Option<std::time::Instant> {
         self.vm.last_response_at()
     }
+
+    /// Bus addresses that produced a real answer during the job(s) run so far. Used after a
+    /// group's `IDENTIFIKATION` (see [`Session::identify_variant`]) to tell whether the
+    /// identified variant's OWN wake address actually replied — i.e. the group already proved
+    /// that ECU is present, even when the variant's own IDENT can't self-probe (it runs via a
+    /// master ECU). Sorted, deduplicated.
+    pub fn responders(&self) -> Vec<u8> {
+        self.vm.responders()
+    }
 }

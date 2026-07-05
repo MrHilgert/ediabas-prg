@@ -128,6 +128,20 @@ pub(super) fn context_strip(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(14.0);
             ui.label(RichText::new(format!("{} · {} · {}", m.code, sm.sgbd, m.bus)).size(10.0).color(c.fg_faint));
+            // Structure-only ЭБУ (в `.ipo` нет ни SGBD, ни групп): экраны — лишь
+            // предпросмотр разметки, живой связи с блоком нет. Честно помечаем, чтобы
+            // пустые значения не читались как «подключено, но молчит».
+            if sm.sgbd.is_empty() && sm.group_files.is_empty() {
+                ui.add_space(10.0);
+                egui::Frame::none()
+                    .fill(c.panel2)
+                    .stroke(Stroke::new(1.0, c.stroke))
+                    .rounding(3.0)
+                    .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(t("structure_only", lang)).size(10.0).color(c.warn));
+                    });
+            }
         });
     });
     ui.add_space(6.0);

@@ -154,3 +154,18 @@ pub fn resolve(rel: &str) -> Option<PathBuf> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::tr_prg;
+    use crate::lang::Lang;
+
+    /// The bulk ECU dictionary (`de-ru.tsv`) must actually load and match: a known German
+    /// `.prg` string translates. Guards against a silent load failure (empty table →
+    /// everything passes through untranslated, "no translations visible").
+    #[test]
+    fn prg_dictionary_loads_and_translates() {
+        let out = tr_prg("% Tastverhältnis", Lang::Ru);
+        assert_eq!(out, "% Скважность", "de-ru.tsv not loaded or key not matched (out={out:?})");
+    }
+}

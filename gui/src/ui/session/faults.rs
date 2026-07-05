@@ -6,7 +6,7 @@ use egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2};
 
 use super::Act;
 use crate::app::App;
-use crate::i18n::t;
+use crate::i18n::{t, tr_prg};
 use crate::lang::Lang;
 use crate::model::DtcView;
 use crate::ui::theme::Colors;
@@ -51,7 +51,9 @@ pub(super) fn render(ui: &mut egui::Ui, c: &Colors, app: &App, act: &mut Option<
     for d in dtcs {
         let expanded = app.fault_open.as_deref() == Some(d.code.as_str());
         let (slabel, scol) = fault_status(c, d.present, d.sporadic, lang);
-        if fault_row(ui, c, &d.code, &d.text, &slabel, scol, expanded) {
+        // F_ORT_TEXT / cause / freeze-frame labels come from the SGBD (`.prg`) in GERMAN —
+        // translate them via the ECU-string dictionary (that's what it's built from).
+        if fault_row(ui, c, &d.code, &tr_prg(&d.text, lang), &slabel, scol, expanded) {
             *act = Some(Act::ToggleFault(d.code.clone()));
         }
         if expanded {
@@ -174,7 +176,7 @@ fn real_fault_detail(ui: &mut egui::Ui, c: &Colors, d: &DtcView, lang: Lang) {
                         ui.add_space(2.0);
                         ui.label(RichText::new("•").size(11.0).color(c.accent));
                         ui.add_space(6.0);
-                        ui.label(RichText::new(cause).size(11.5).color(c.fg));
+                        ui.label(RichText::new(tr_prg(cause, lang)).size(11.5).color(c.fg));
                     });
                 }
             }
@@ -201,7 +203,7 @@ fn real_fault_detail(ui: &mut egui::Ui, c: &Colors, d: &DtcView, lang: Lang) {
                     }
                     let end = (i + per).min(d.uw.len());
                     let cells: Vec<KvCell> =
-                        d.uw[i..end].iter().map(|u| kv(&u.text, u.val.clone(), &u.unit, c.fg)).collect();
+                        d.uw[i..end].iter().map(|u| kv(&tr_prg(&u.text, lang), u.val.clone(), &u.unit, c.fg)).collect();
                     kv_grid(ui, c, &cells);
                     i = end;
                 }

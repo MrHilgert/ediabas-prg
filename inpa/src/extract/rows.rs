@@ -121,9 +121,11 @@ fn build_info(entries: &[Option<String>], title: &str) -> Vec<InfoLine> {
                 Some(Some(v)) if v.trim() != ":" => {
                     let v = v.trim().to_string();
                     j += 1;
-                    // An empty string literal is a runtime placeholder INPA fills at display
-                    // time — show it as an (unresolved) dash, not a blank.
-                    if v.is_empty() {
+                    // An empty literal — or an INPA infrastructure constant (a DLL import
+                    // signature like `kernel32::GetPrivateProfileIntA:c.ssis%I`, which is really
+                    // a runtime INI read) — is a placeholder INPA fills at display time. Show it
+                    // as an (unresolved) dash, not the raw junk.
+                    if v.is_empty() || is_infra_const(&v) {
                         InfoValue::Runtime
                     } else {
                         InfoValue::Const(v)
@@ -144,24 +146,44 @@ fn build_info(entries: &[Option<String>], title: &str) -> Vec<InfoLine> {
     out
 }
 
-/// Whether `s` reads as a human display label rather than an INPA infrastructure constant.
-/// `ftextout` operands include DLL-import signatures (`user32::CharLowerA`) and printf-style
-/// format strings (`c.s%S`) that must NOT leak into visible field labels. A real label has a
-/// letter and neither a `::` module path nor a `%<letter>` format token.
+/// Whether `s` reads as a human display label rather than INPA plumbing. `ftextout` operands
+/// include DLL-import signatures (`user32::CharLowerA`), printf format strings (`c.s%S`), and
+/// on-screen F-key navigation hints (`< F1 >  Read error memory`) — none of which are field
+/// labels. A real label has a letter and is none of those.
 fn looks_like_label(s: &str) -> bool {
     let t = s.trim();
-    if t.is_empty() || t.contains("::") {
-        return false;
+    !t.is_empty() && !is_infra_const(t) && !is_nav_hint(t) && t.chars().any(char::is_alphabetic)
+}
+
+/// An INPA infrastructure constant: a DLL import path (`module::func`) or a printf-style
+/// format token (`%` followed by a format letter). These are runtime plumbing, not display text.
+fn is_infra_const(s: &str) -> bool {
+    if s.contains("::") {
+        return true;
     }
-    let bytes = t.as_bytes();
-    let has_fmt = bytes
-        .iter()
+    let b = s.as_bytes();
+    b.iter()
         .enumerate()
-        .any(|(i, &b)| b == b'%' && bytes.get(i + 1).is_some_and(u8::is_ascii_alphabetic));
-    if has_fmt {
-        return false;
+        .any(|(i, &c)| c == b'%' && b.get(i + 1).is_some_and(u8::is_ascii_alphabetic))
+}
+
+/// An on-screen F-key navigation hint INPA draws on hub screens (`< F1 >  …`, `<F10>: Back`,
+/// `<Shift> + < F2 >  …`). These describe the F-key menu, not the screen's data — rendering
+/// them leaks INPA's own navigation text into our (already button+F-panel) UI. Detected by an
+/// angle-bracketed `F<digit>` or a `<Shift>` combo prefix anywhere in the line.
+fn is_nav_hint(s: &str) -> bool {
+    let t = s.trim();
+    for (i, _) in t.match_indices('<') {
+        let rest = t[i + 1..].trim_start();
+        if rest.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("shift")) {
+            return true;
+        }
+        let mut ch = rest.chars();
+        if matches!(ch.next(), Some('F' | 'f')) && ch.next().is_some_and(|c| c.is_ascii_digit()) {
+            return true;
+        }
     }
-    t.chars().any(char::is_alphabetic)
+    false
 }
 
 /// Build a [`Row`] from an `ergebnis*` helper call, if `name` is a recognised helper.
@@ -236,20 +258,38 @@ fn clean_unit(u: Option<&String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_label;
+
 
     #[test]
     fn label_filter_rejects_infra_constants() {
         // Real labels pass.
-        assert!(looks_like_label("Rail-pressure"));
-        assert!(looks_like_label("Давление в рампе"));
-        assert!(looks_like_label("Duty 50%")); // trailing % (no format letter) is fine
+        assert!(super::looks_like_label("Rail-pressure"));
+        assert!(super::looks_like_label("Давление в рампе"));
+        assert!(super::looks_like_label("Duty 50%")); // trailing % (no format letter) is fine
+        assert!(super::looks_like_label("Byte 1:")); // real coding-section heading
         // INPA infrastructure / format-string leaks are rejected.
-        assert!(!looks_like_label("user32::CharLowerA:c.s%S"));
-        assert!(!looks_like_label("c.s%S"));
-        assert!(!looks_like_label("%d"));
-        assert!(!looks_like_label("kernel32::GetProcAddress"));
-        assert!(!looks_like_label(""));
-        assert!(!looks_like_label("---")); // punctuation-only, no letter
+        assert!(!super::looks_like_label("user32::CharLowerA:c.s%S"));
+        assert!(!super::looks_like_label("c.s%S"));
+        assert!(!super::looks_like_label("%d"));
+        assert!(!super::looks_like_label("kernel32::GetProcAddress"));
+        assert!(!super::looks_like_label(""));
+        assert!(!super::looks_like_label("---")); // punctuation-only, no letter
+        // On-screen F-key navigation hints are rejected (leak into our UI otherwise).
+        assert!(!super::looks_like_label("< F1 >  Read error memory"));
+        assert!(!super::looks_like_label("<F10>: Back"));
+        assert!(!super::looks_like_label("<F2> : Analog status"));
+        assert!(!super::looks_like_label("<Shift> + < F1 >  Exhaust valve front left"));
+        assert!(!super::looks_like_label("<Shift> + < F10>  Exit"));
+        // A real label that merely contains '<' as a comparison is NOT a nav hint.
+        assert!(super::looks_like_label("Voltage < 5V"));
+    }
+
+    #[test]
+    fn infra_const_detects_runtime_plumbing() {
+        assert!(super::is_infra_const("kernel32::GetPrivateProfileIntA:c.ssis%I"));
+        assert!(super::is_infra_const("c.s%S"));
+        assert!(!super::is_infra_const("1.12")); // a real version value must survive
+        assert!(!super::is_infra_const("Central Body Electronics IV E36"));
+        assert!(!super::is_infra_const("50%")); // trailing % without format letter is fine
     }
 }

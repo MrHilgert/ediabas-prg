@@ -15,7 +15,7 @@ use std::time::Duration;
 use ediabas::{Error, JobResult, Session};
 use inpa::model::ScreenModule;
 
-use crate::model::{ConnReason, Intent, Update};
+use crate::model::{ConnReason, Intent, NoticeKind, Update};
 
 use super::decode;
 
@@ -113,6 +113,20 @@ fn run(cmd_rx: Receiver<Intent>, evt_tx: Sender<Update>, wake: Box<dyn Fn() + Se
     }
 }
 
+/// Отправить ошибку джоба в UI, разведя её природу. Транспорт (шина/ЭБУ) — тихо: сама
+/// телеграмма и `RX err` уже в ediabas-трейсе, UI покажет это лёгкой строкой. Внутренняя
+/// (баг интерпретатора / данных SGBD / пробел фичи) — громко в stderr, ибо это дефект
+/// инструмента, а не «машина молчит»; UI выделит её отдельно. Связь в обоих случаях цела.
+fn notice_err(tx: &Sender<Update>, e: &Error) {
+    let kind = if e.is_transport() {
+        NoticeKind::Bus
+    } else {
+        eprintln!("eDIAG: внутренняя ошибка джоба — {e}");
+        NoticeKind::Internal
+    };
+    let _ = tx.send(Update::Notice { kind, msg: e.to_string() });
+}
+
 /// Обработать одно намерение. Возвращает `false` только на `Shutdown`.
 fn handle_intent(st: &mut WorkerState, tx: &Sender<Update>, intent: Intent) -> bool {
     match intent {
@@ -151,7 +165,7 @@ fn handle_intent(st: &mut WorkerState, tx: &Sender<Update>, intent: Intent) -> b
             // Активация / джоб меню: запустить и забыть; ошибку — показать.
             if let Some(s) = st.session.as_mut() {
                 if let Err(e) = s.run_job(&job, &arg) {
-                    let _ = tx.send(Update::Notice(e.to_string()));
+                    notice_err(tx, &e);
                 }
             }
         }
@@ -159,7 +173,7 @@ fn handle_intent(st: &mut WorkerState, tx: &Sender<Update>, intent: Intent) -> b
         Intent::ClearFaults => {
             if let Some(s) = st.session.as_mut() {
                 if let Err(e) = s.run_job("FS_LOESCHEN", "") {
-                    let _ = tx.send(Update::Notice(e.to_string()));
+                    notice_err(tx, &e);
                     return true;
                 }
             }
@@ -180,30 +194,45 @@ fn run_faults(st: &mut WorkerState, tx: &Sender<Update>) {
         Ok(fr) => {
             let _ = tx.send(Update::Faults(decode::decode_faults(&fr)));
         }
-        Err(e) => {
-            let _ = tx.send(Update::Notice(e.to_string()));
-        }
+        Err(e) => notice_err(tx, &e),
     }
 }
 
+/// Исход одного опроса экрана. Разводит «нечего спрашивать» и «внутренняя ошибка» от
+/// настоящего молчания шины — только последнее двигает счётчик промахов к обрыву линка.
+enum PollOutcome {
+    /// Пришли данные — накладываем и рисуем.
+    Data(JobResult),
+    /// У экрана нет джобов опроса (нет живого источника) ИЛИ нет сессии. Это НЕ сбой связи:
+    /// линк держим, счётчик промахов не трогаем (иначе статичный экран рвал бы связь).
+    Nothing,
+    /// Все запросы упали транспортом / вернули пусто — шину спросили, она молчит. Транзиентно.
+    BusMiss,
+    /// Джоб упал внутренней (не транспортной) ошибкой — дефект, а не мёртвая шина.
+    Internal(String),
+}
+
 /// Потоковый тик: опросить открытый экран, наложить на накопитель, декодировать, отдать
-/// `Live` (или `PollMiss`, если тик пуст — прошлые значения UI держит сам).
+/// `Live`. `PollMiss` шлём ТОЛЬКО на реальном молчании шины (см. [`PollOutcome`]).
 fn poll_stream(st: &mut WorkerState, tx: &Sender<Update>, id: usize) {
     let reqs = match &st.module {
         Some(sm) => sm.as_screen(id).map(poll_reqs).unwrap_or_default(),
         None => return,
     };
     match run_reqs(st.session.as_mut(), &reqs) {
-        Some(tick) => {
+        PollOutcome::Data(tick) => {
             match &mut st.held {
                 Some(h) => h.overlay(tick),
                 None => st.held = Some(tick),
             }
             emit_live(st, tx, id);
         }
-        None => {
-            let _ = tx.send(Update::PollMiss);
+        PollOutcome::BusMiss => { let _ = tx.send(Update::PollMiss); }
+        PollOutcome::Internal(msg) => {
+            eprintln!("eDIAG: внутренняя ошибка опроса — {msg}");
+            let _ = tx.send(Update::Notice { kind: NoticeKind::Internal, msg });
         }
+        PollOutcome::Nothing => {} // нечего опрашивать — не промах, линк не трогаем
     }
 }
 
@@ -214,13 +243,16 @@ fn poll_once(st: &mut WorkerState, tx: &Sender<Update>, id: usize) {
         None => return,
     };
     match run_reqs(st.session.as_mut(), &reqs) {
-        Some(tick) => {
+        PollOutcome::Data(tick) => {
             st.held = Some(tick);
             emit_live(st, tx, id);
         }
-        None => {
-            let _ = tx.send(Update::PollMiss);
+        PollOutcome::BusMiss => { let _ = tx.send(Update::PollMiss); }
+        PollOutcome::Internal(msg) => {
+            eprintln!("eDIAG: внутренняя ошибка опроса — {msg}");
+            let _ = tx.send(Update::Notice { kind: NoticeKind::Internal, msg });
         }
+        PollOutcome::Nothing => {}
     }
 }
 
@@ -233,20 +265,33 @@ fn emit_live(st: &WorkerState, tx: &Sender<Update>, id: usize) {
     }
 }
 
-/// Прогнать список `(job, arg)` и слить наборы результатов в один `JobResult`.
-/// `None` — если ни один запрос не дал данных (транзиентный промах).
-fn run_reqs(session: Option<&mut Session>, reqs: &[(String, String)]) -> Option<JobResult> {
-    let s = session?;
+/// Прогнать список `(job, arg)` и слить наборы результатов в один `JobResult`. Различает
+/// исходы (см. [`PollOutcome`]): нет сессии/запросов → `Nothing`; есть данные → `Data`;
+/// джоб упал внутренней ошибкой → `Internal` (первую и запоминаем); иначе (спросили, но
+/// пусто/таймаут) → `BusMiss`. Транспортные ошибки отдельных джобов молча пропускаем —
+/// это нормальный шум мульти-адресного опроса, а не дефект.
+fn run_reqs(session: Option<&mut Session>, reqs: &[(String, String)]) -> PollOutcome {
+    let Some(s) = session else { return PollOutcome::Nothing };
+    if reqs.is_empty() {
+        return PollOutcome::Nothing;
+    }
     let mut merged: Option<JobResult> = None;
+    let mut internal: Option<String> = None;
     for (job, arg) in reqs {
-        if let Ok(r) = s.run_job(job, arg) {
-            match &mut merged {
+        match s.run_job(job, arg) {
+            Ok(r) => match &mut merged {
                 Some(acc) => acc.extend(r),
                 None => merged = Some(r),
-            }
+            },
+            Err(e) if e.is_transport() => {} // транзиентный шум шины — ждём следующий тик
+            Err(e) => { internal.get_or_insert_with(|| e.to_string()); }
         }
     }
-    merged
+    match (merged, internal) {
+        (Some(data), _) => PollOutcome::Data(data),
+        (None, Some(msg)) => PollOutcome::Internal(msg),
+        (None, None) => PollOutcome::BusMiss,
+    }
 }
 
 /// Список запросов на тик для экрана данных: батчи `MW_SELECT_LESEN_NORM` (≤10

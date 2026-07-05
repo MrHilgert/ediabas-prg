@@ -185,6 +185,28 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                 });
             });
         });
+
+    // Внутренняя ошибка (дефект интерпретатора/данных SGBD) — заметный баннер под шапкой, в
+    // отличие от тихого шинного статуса: красная рамка/текст + значок, с крестиком закрытия.
+    // Держится, пока не пойдут данные (снимается в apply) или пользователь не закроет.
+    if let Some(msg) = app.internal_error.clone() {
+        let frame = egui::Frame::none()
+            .fill(c.panel2)
+            .stroke(Stroke::new(1.5, c.err))
+            .inner_margin(egui::Margin::symmetric(14.0, 8.0));
+        egui::TopBottomPanel::top("internal_error").frame(frame).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("⚠").size(13.0).color(c.err));
+                ui.add_space(6.0);
+                ui.label(RichText::new(msg).size(12.0).color(c.err));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if flat_button(ui, &c, "✕") {
+                        app.internal_error = None;
+                    }
+                });
+            });
+        });
+    }
 }
 
 /// A dimmed field label in the settings grid's left column, right-aligned so the

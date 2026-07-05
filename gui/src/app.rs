@@ -88,7 +88,8 @@ pub struct App {
     // Diagnostic worker (ЭБУ-слой). Spun up at App::new so ports/connect are always
     // reachable; idles until a Connect intent arrives.
     pub worker: Worker,
-    pub status_msg: String,
+    pub status_msg: String,                // тихая строка: транспортный шум / нет связи
+    pub internal_error: Option<String>,    // заметный баннер: внутренний дефект (VM/PRG/фича)
     // Real connection / live data (screen 3, DDE via MW_SELECT_LESEN_NORM)
     pub link: Link,                        // connection state machine (see `Link`)
     pub iface: Option<String>,             // protocol label of the live link (header chip)
@@ -153,6 +154,7 @@ impl App {
             faults_tries: 0,
             worker,
             status_msg: String::new(),
+            internal_error: None,
             link: Link::Idle,
             iface: None,
             streaming: false,
@@ -258,6 +260,7 @@ impl App {
         self.live_screen = None;
         self.iface = None;
         self.status_msg.clear();
+        self.internal_error = None;
     }
 
     /// Reset the connection lifecycle to `Idle` (no link, nothing in flight).
@@ -318,11 +321,13 @@ impl App {
                 self.comms_seq = self.comms_seq.wrapping_add(1); // real exchange → pulse
                 self.comms_miss = 0;
                 self.info_busy = false;
+                self.internal_error = None; // данные пошли — снять баннер дефекта
                 self.live = Some(frame);
             }
             Update::Faults(view) => {
                 self.comms_seq = self.comms_seq.wrapping_add(1);
                 self.comms_miss = 0;
+                self.internal_error = None;
                 self.faults = Some(view);
                 self.faults_busy = false;
             }
@@ -348,12 +353,23 @@ impl App {
                 };
                 self.link = Link::Failed { reason: crate::i18n::t(key, self.lang) };
             }
-            Update::Notice(msg) => {
+            Update::Notice { kind, msg } => {
                 // A job failed mid-session — keep the link, just surface it. A truly dead
-                // bus is caught by the stream miss-counter.
+                // bus is caught by the stream miss-counter. Bus vs internal show differently:
+                // transport noise is a quiet status line (the ECU/link, expected to glitch);
+                // an internal fault is a prominent banner (a defect in the tool or its data).
+                use crate::model::NoticeKind;
                 self.faults_busy = false;
                 self.info_busy = false;
-                self.status_msg = format!("{}: {msg}", crate::i18n::t("job_error", self.lang));
+                match kind {
+                    NoticeKind::Bus => {
+                        self.status_msg = format!("{}: {msg}", crate::i18n::t("job_error", self.lang));
+                    }
+                    NoticeKind::Internal => {
+                        self.internal_error =
+                            Some(format!("{}: {msg}", crate::i18n::t("internal_error", self.lang)));
+                    }
+                }
             }
         }
     }

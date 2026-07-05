@@ -289,12 +289,27 @@ impl Transport for Ds2Transport {
         trace!("TX: {}", fmt_hex(&with_chk));
         self.send_raw(&with_chk)?;
         self.driver.set_timeout(self.timeout_std_ms)?;
-        let resp = self.receive();
-        match &resp {
-            Ok(r)  => trace!("RX: {}", fmt_hex(r)),
-            Err(e) => trace!("RX err: {e}"),
+        match self.receive() {
+            Ok(r) if is_our_reply(&with_chk, &r) => {
+                trace!("RX: {}", fmt_hex(&r));
+                Ok(r)
+            }
+            Ok(r) => {
+                // A reply whose address ≠ our request target is another module's frame, not
+                // our answer (see `is_our_reply`). Reject as "no answer" (non-fatal at the
+                // xsend layer) rather than decode a foreign module's data as this ECU's.
+                trace!(
+                    "RX from {:#04X} ≠ target {:#04X} — foreign frame discarded",
+                    r.first().copied().unwrap_or(0),
+                    with_chk.first().copied().unwrap_or(0),
+                );
+                Err(Error::Timeout)
+            }
+            Err(e) => {
+                trace!("RX err: {e}");
+                Err(e)
+            }
         }
-        resp
     }
 
     fn disconnect(&mut self) -> Result<()> { Ok(()) }
@@ -302,6 +317,18 @@ impl Transport for Ds2Transport {
 
 fn fmt_hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ")
+}
+
+/// Whether DS2 reply `resp` is the answer to the request we `sent`. In every DS2 concept
+/// the addressed ECU echoes its OWN diagnostic address as byte 0 — of both the request and
+/// its reply — so a reply that starts with a different address is another module's frame
+/// (e.g. an FS_LESEN to a silent MFL@0x50 while the LCM@0xD0 chattered), never our answer.
+/// An empty request or reply is inconclusive → accepted (nothing to reject on).
+fn is_our_reply(sent: &[u8], resp: &[u8]) -> bool {
+    match (sent.first(), resp.first()) {
+        (Some(tgt), Some(src)) => tgt == src,
+        _ => true,
+    }
 }
 
 /// Parse hex string "B812F1..." or "B8 12 F1 ..." into bytes.
@@ -374,5 +401,18 @@ mod tests {
         // receive() returns the whole telegram minus the trailing CHK (EDIABAS result
         // byte-positions index into the full frame, header included).
         assert_eq!(resp, &[0xB8, 0x07, 0x61, 0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn foreign_address_reply_is_rejected() {
+        // Request to MFL (0x50); the bus answers with a frame from the LCM (0xD0) — a stray
+        // module, not our answer. It must be rejected, or its data decodes as garbage faults.
+        assert!(!is_our_reply(&[0x50, 0x05, 0x04, 0x01, 0x50], &[0xD0, 0x24, 0xA0, 0xC1]));
+        // Same address on both sides (the normal case) is accepted.
+        assert!(is_our_reply(&[0x50, 0x05, 0x04, 0x01, 0x50], &[0x50, 0x10, 0xA0, 0x00]));
+        // 4-byte BMW DS2 (DDE40): ECU echoes B8 as byte 0 of request and reply → accepted.
+        assert!(is_our_reply(&[0xB8, 0x12, 0xF1, 0x04], &[0xB8, 0xF1, 0x12, 0x2B]));
+        // Inconclusive (empty) → not rejected.
+        assert!(is_our_reply(&[], &[0xD0]));
     }
 }

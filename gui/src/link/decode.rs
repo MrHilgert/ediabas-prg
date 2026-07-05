@@ -91,8 +91,11 @@ pub fn decode_live(fr: &JobResult, screen: &Screen) -> MeasFrame {
                     .unwrap_or_else(|| unit.clone());
                 MeasCell { row: i, num: fr.get_f64(res), text: None, unit: u }
             }
-            Row::Logical { .. } => {
-                MeasCell { row: i, num: fr.get_f64(res), text: None, unit: String::new() }
+            Row::Logical { on, off, .. } => {
+                // Логический результат ЭБУ может прийти числом (бит) ИЛИ строкой («ein»/«aktiv»/
+                // имя из on/off). UI решает on/off по `num>=0.5`, поэтому приводим строку к 0/1,
+                // иначе строковый статус даёт `num=None` → «—» (строка «не обновляется»).
+                MeasCell { row: i, num: logical_num(fr, res, on, off), text: None, unit: String::new() }
             }
             Row::Text { .. } => {
                 MeasCell { row: i, num: None, text: fr.get_str(res), unit: String::new() }
@@ -125,6 +128,31 @@ pub fn decode_live(fr: &JobResult, screen: &Screen) -> MeasFrame {
         Vec::new()
     };
     MeasFrame { cells, raw_names, dump }
+}
+
+/// Приведение логического результата к 0/1 для UI. Сначала число (бит/уровень), затем строка:
+/// сверяем с объявленными в строке `on`/`off`, потом с общими токенами вкл/выкл (DE/EN).
+/// `None` — значение не пришло или нераспознано (UI покажет «—»).
+fn logical_num(fr: &JobResult, res: &str, on: &str, off: &str) -> Option<f64> {
+    if let Some(n) = fr.get_f64(res) {
+        return Some(if n >= 0.5 { 1.0 } else { 0.0 });
+    }
+    let raw = fr.get_str(res)?;
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if !on.trim().is_empty() && s.eq_ignore_ascii_case(on.trim()) {
+        return Some(1.0);
+    }
+    if !off.trim().is_empty() && s.eq_ignore_ascii_case(off.trim()) {
+        return Some(0.0);
+    }
+    match s.to_ascii_lowercase().as_str() {
+        "ein" | "on" | "active" | "aktiv" | "yes" | "ja" | "true" | "high" | "h" => Some(1.0),
+        "aus" | "off" | "inactive" | "inaktiv" | "no" | "nein" | "false" | "low" | "l" => Some(0.0),
+        _ => None,
+    }
 }
 
 fn fmt_uw(v: f64) -> String {

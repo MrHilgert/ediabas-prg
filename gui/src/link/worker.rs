@@ -83,10 +83,14 @@ struct WorkerState {
     /// Накопитель значений (overlay между тиками): значение, пропавшее в этом тике,
     /// держит прошлое показание, а не бланкуется.
     held: Option<JobResult>,
+    /// Джобы, молча упавшие транспортом на прошлом тике опроса — чтобы логировать частичный
+    /// сбой (часть строк не обновляется) один раз на смену набора, а не каждый тик.
+    last_missed: Vec<String>,
 }
 
 fn run(cmd_rx: Receiver<Intent>, evt_tx: Sender<Update>, wake: Box<dyn Fn() + Send + Sync>) {
-    let mut st = WorkerState { session: None, module: None, stream: None, held: None };
+    let mut st =
+        WorkerState { session: None, module: None, stream: None, held: None, last_missed: Vec::new() };
 
     loop {
         let wait = if st.stream.is_some() {
@@ -219,8 +223,18 @@ fn poll_stream(st: &mut WorkerState, tx: &Sender<Update>, id: usize) {
         Some(sm) => sm.as_screen(id).map(poll_reqs).unwrap_or_default(),
         None => return,
     };
-    match run_reqs(st.session.as_mut(), &reqs) {
+    let (outcome, missed) = run_reqs(st.session.as_mut(), &reqs);
+    match outcome {
         PollOutcome::Data(tick) => {
+            // Частичный сбой: данные пришли, но часть джобов молчит → часть строк не
+            // обновляется. Логируем один раз на смену набора (не каждый тик), чтобы отличить
+            // «стабильно не отвечает» от разового шума — и увидеть, ЧТО именно не тянется.
+            if missed != st.last_missed {
+                if !missed.is_empty() {
+                    eprintln!("eDIAG: частичный опрос — не ответили: {}", missed.join(", "));
+                }
+                st.last_missed = missed;
+            }
             match &mut st.held {
                 Some(h) => h.overlay(tick),
                 None => st.held = Some(tick),
@@ -242,8 +256,12 @@ fn poll_once(st: &mut WorkerState, tx: &Sender<Update>, id: usize) {
         Some(sm) => sm.as_screen(id).map(poll_reqs).unwrap_or_default(),
         None => return,
     };
-    match run_reqs(st.session.as_mut(), &reqs) {
+    let (outcome, missed) = run_reqs(st.session.as_mut(), &reqs);
+    match outcome {
         PollOutcome::Data(tick) => {
+            if !missed.is_empty() {
+                eprintln!("eDIAG: частичное чтение экрана — не ответили: {}", missed.join(", "));
+            }
             st.held = Some(tick);
             emit_live(st, tx, id);
         }
@@ -270,28 +288,33 @@ fn emit_live(st: &WorkerState, tx: &Sender<Update>, id: usize) {
 /// джоб упал внутренней ошибкой → `Internal` (первую и запоминаем); иначе (спросили, но
 /// пусто/таймаут) → `BusMiss`. Транспортные ошибки отдельных джобов молча пропускаем —
 /// это нормальный шум мульти-адресного опроса, а не дефект.
-fn run_reqs(session: Option<&mut Session>, reqs: &[(String, String)]) -> PollOutcome {
-    let Some(s) = session else { return PollOutcome::Nothing };
+fn run_reqs(session: Option<&mut Session>, reqs: &[(String, String)]) -> (PollOutcome, Vec<String>) {
+    let Some(s) = session else { return (PollOutcome::Nothing, Vec::new()) };
     if reqs.is_empty() {
-        return PollOutcome::Nothing;
+        return (PollOutcome::Nothing, Vec::new());
     }
     let mut merged: Option<JobResult> = None;
     let mut internal: Option<String> = None;
+    let mut missed: Vec<String> = Vec::new();
     for (job, arg) in reqs {
         match s.run_job(job, arg) {
             Ok(r) => match &mut merged {
                 Some(acc) => acc.extend(r),
                 None => merged = Some(r),
             },
-            Err(e) if e.is_transport() => {} // транзиентный шум шины — ждём следующий тик
+            // Транзиентный шум шины — ждём следующий тик, но запоминаем, ЧТО не ответило: если
+            // часть джобов данного экрана стабильно молчит (часть строк не обновляется), это
+            // видно в логе, а не проглатывается немо.
+            Err(e) if e.is_transport() => missed.push(job.clone()),
             Err(e) => { internal.get_or_insert_with(|| e.to_string()); }
         }
     }
-    match (merged, internal) {
+    let outcome = match (merged, internal) {
         (Some(data), _) => PollOutcome::Data(data),
         (None, Some(msg)) => PollOutcome::Internal(msg),
         (None, None) => PollOutcome::BusMiss,
-    }
+    };
+    (outcome, missed)
 }
 
 /// Список запросов на тик для экрана данных: батчи `MW_SELECT_LESEN_NORM` (≤10
@@ -300,6 +323,10 @@ fn poll_reqs(screen: &inpa::Screen) -> Vec<(String, String)> {
     let mut selectors: Vec<String> = Vec::new();
     let mut jobs: Vec<(String, String)> = Vec::new();
     let mut push_job = |job: &str, arg: &str| {
+        // MW_SELECT_LESEN_NORM без селектора — no-op запрос (нечего читать); не шлём.
+        if job == "MW_SELECT_LESEN_NORM" && arg.is_empty() {
+            return;
+        }
         if !job.is_empty() && !jobs.iter().any(|(j, a)| j == job && a == arg) {
             jobs.push((job.to_string(), arg.to_string()));
         }

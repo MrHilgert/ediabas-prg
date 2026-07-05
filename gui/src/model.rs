@@ -115,9 +115,10 @@ pub enum NoticeKind {
 /// Событие из слоя ЭБУ в UI. Полезная нагрузка — только view-модели, ни одного
 /// типа `ediabas`.
 pub enum Update {
-    /// Связь установлена (INITIALISIERUNG прошла, ЭБУ ответил). Метку интерфейса UI
-    /// берёт из каталога — здесь полезной нагрузки нет.
-    Connected,
+    /// Связь установлена (INITIALISIERUNG прошла, ЭБУ ответил). `variant` — имя реально
+    /// открытого `.prg` (SGBD-вариант, напр. `D40M57A1` или базовый `DDE40KW0`); по нему UI
+    /// выбирает вариантные экраны (`s_analog1_d40m57a1`) через `screen_for_variant`.
+    Connected { variant: String },
     /// Свежий кадр живых значений открытого экрана.
     Live(MeasFrame),
     Faults(FaultView),

@@ -140,10 +140,10 @@ fn handle_intent(st: &mut WorkerState, tx: &Sender<Update>, intent: Intent) -> b
             st.session = None; // отпустить прежнюю сессию (освободить порт)
             st.module = None;
             match connect(&port, &script) {
-                Ok((s, sm)) => {
+                Ok((s, sm, variant)) => {
                     st.session = Some(s);
                     st.module = Some(sm);
-                    let _ = tx.send(Update::Connected);
+                    let _ = tx.send(Update::Connected { variant });
                 }
                 Err(e) => {
                     let _ = tx.send(Update::ConnectFailed(e));
@@ -375,7 +375,13 @@ struct Candidate {
 /// LWR-класс (IDENT через мастер-ЭБУ) всё же коннектится. Порт один — держим не больше одной
 /// открытой сессии; поэтому найденный `group_proven` держим открытым как запасной и роняем
 /// только ради попытки следующего кандидата.
-fn connect(port: &str, script: &str) -> Result<(Session, ScreenModule), ConnReason> {
+/// Имя варианта из имени `.prg` (`D40M57A1.prg` → `D40M57A1`) — суффикс вариантных экранов.
+fn prg_stem(prg: &str) -> String {
+    let p = prg.strip_suffix(".prg").or_else(|| prg.strip_suffix(".PRG")).unwrap_or(prg);
+    p.to_string()
+}
+
+fn connect(port: &str, script: &str) -> Result<(Session, ScreenModule, String), ConnReason> {
     let sm = load_ipo(script)
         .ok_or_else(|| ConnReason::Other(format!("не удалось разобрать .ipo для {script}")))?;
     // Свежий диагностический контекст: сбрасываем EDIABAS shared memory (shmset/shmget), чтобы
@@ -391,6 +397,7 @@ fn connect(port: &str, script: &str) -> Result<(Session, ScreenModule), ConnReas
     // переоткрытия, если пришлось уронить ради следующего кандидата.
     let mut held: Option<Session> = None;
     let mut held_name: Option<String> = None;
+    let mut held_variant: Option<String> = None; // вариант, совпадающий с сессией `held`
     // Сбой ОТКРЫТИЯ ПОРТА (нет адаптера / занят) — не «ЭБУ молчит»: важнее «нет ответа».
     let mut port_err: Option<ConnReason> = None;
 
@@ -413,7 +420,7 @@ fn connect(port: &str, script: &str) -> Result<(Session, ScreenModule), ConnReas
         // DS2 INITIALISIERUNG лишь настраивает параметры локально — присутствие доказываем
         // реальным IDENT-джобом. Ответил сам → это лучший кандидат, берём немедленно.
         if s.probe_presence().is_ok() {
-            return Ok((s, sm));
+            return Ok((s, sm, prg_stem(&cand.prg)));
         }
         // Сам не ответил, но группа уже видела его wake-адрес → держим как запасной.
         if cand.group_proven {
@@ -421,18 +428,20 @@ fn connect(port: &str, script: &str) -> Result<(Session, ScreenModule), ConnReas
                 held_name = Some(cand.prg.clone());
             }
             held = Some(s);
+            held_variant = Some(prg_stem(&cand.prg));
         }
     }
 
     // Ни один не прошёл IDENT. Принять group_proven (группа доказала присутствие).
     if let Some(s) = held {
-        return Ok((s, sm)); // ещё открыт (был последним кандидатом) — без переоткрытия
+        // ещё открыт (был последним кандидатом) — без переоткрытия
+        return Ok((s, sm, held_variant.unwrap_or_default()));
     }
     if let Some(name) = held_name {
         // group_proven был уронён ради следующего (тоже неудачного) кандидата — переоткрыть.
         if let Ok(mut s) = Session::open(&port, BAUD, &resolve_prg(&name)) {
             if s.initialize().is_ok() {
-                return Ok((s, sm));
+                return Ok((s, sm, prg_stem(&name)));
             }
         }
     }

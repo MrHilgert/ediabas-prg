@@ -90,6 +90,7 @@ pub struct App {
     pub worker: Worker,
     pub status_msg: String,                // тихая строка: транспортный шум / нет связи
     pub internal_error: Option<String>,    // заметный баннер: внутренний дефект (VM/PRG/фича)
+    pub connected_variant: String,         // реально открытый SGBD-вариант → вариантные экраны
     // Real connection / live data (screen 3, DDE via MW_SELECT_LESEN_NORM)
     pub link: Link,                        // connection state machine (see `Link`)
     pub iface: Option<String>,             // protocol label of the live link (header chip)
@@ -155,6 +156,7 @@ impl App {
             worker,
             status_msg: String::new(),
             internal_error: None,
+            connected_variant: String::new(),
             link: Link::Idle,
             iface: None,
             streaming: false,
@@ -321,11 +323,13 @@ impl App {
     pub fn apply_update(&mut self, up: crate::model::Update) {
         use crate::model::{ConnReason, Update};
         match up {
-            Update::Connected => {
-                // A handshake completed → promote Connecting → Connected.
+            Update::Connected { variant } => {
+                // A handshake completed → promote Connecting → Connected. Remember the actually
+                // opened SGBD variant so screen opens can pick the matching variant screen.
                 if let Link::Connecting { code } = self.link {
                     self.link = Link::Connected { code };
                 }
+                self.connected_variant = variant;
                 self.status_msg.clear();
             }
             Update::PollMiss => {

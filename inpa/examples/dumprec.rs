@@ -34,6 +34,24 @@ fn main() {
                 }
             }
         }
+        // Resolve each menu item's nav target to a screen NAME (which variant we actually open).
+        for n in &sm.nodes {
+            if let inpa::Node::Menu(mn) = n {
+                if !filt.is_empty() && !mn.name.to_lowercase().contains(&filt) {
+                    continue;
+                }
+                println!("\n>> MENU {} items:", mn.name);
+                for it in &mn.items {
+                    let tgt = match &it.target {
+                        inpa::NavTarget::Screen(id) | inpa::NavTarget::ScreenAndMenu { screen: id, .. } => {
+                            sm.as_screen(*id).map(|s| s.name.clone()).unwrap_or_default()
+                        }
+                        other => format!("{other:?}"),
+                    };
+                    println!("     [{}] {:?} -> {}", it.fkey, it.label, tgt);
+                }
+            }
+        }
         println!("\n---- raw records ----");
     }
 

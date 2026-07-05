@@ -245,8 +245,16 @@ fn decode_target(
         match cs.target {
             Target::Builtin(b) => match b {
                 builtin::SETSCREEN => {
-                    if let Some(Val::ScreenRef(n)) = cs.args.first() {
-                        screen_t = screen_map.get(&(*n as u32)).copied();
+                    // A data item issues TWO SETSCREENs: the generic screen first, then a
+                    // variant override (`s_analog1` then `s_analog1_d40m57a1`). Keep the FIRST
+                    // (generic base) — the runtime picks the variant sibling by the connected
+                    // SGBD via `ScreenModule::screen_for_variant`. Taking the last would pin
+                    // every ECU to one variant's result names (e.g. `_IST_WERT`), so a base ECU
+                    // returning `_WERT` shows dashes on exactly the diverging rows.
+                    if screen_t.is_none() {
+                        if let Some(Val::ScreenRef(n)) = cs.args.first() {
+                            screen_t = screen_map.get(&(*n as u32)).copied();
+                        }
                     }
                 }
                 builtin::SETMENU => {

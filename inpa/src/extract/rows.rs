@@ -38,7 +38,18 @@ pub(super) fn extract_screen(
         // The LINE-record index is the group key: rows from one record share an INPA line.
         let line = li as u16;
         let is_code = rec.tag == tag::CODE;
-        let Some(code) = rec.code() else { continue };
+        // A metadata-style LINE record has an EMPTY code body (`Body::Code` of length 0, so
+        // `code()` is `Some(&[])`, not `None`) and carries its binding in `str2` (label) /
+        // `str3` (result-id) — e.g. LCM activation screens list 54 in/outputs this way. Without
+        // this the screen extracts zero rows and renders empty. Attach the current feeder job
+        // (empty for pure selection screens like LCM → a static list; a real feeder → polls).
+        let code = rec.code().unwrap_or(&[]);
+        if code.is_empty() {
+            if rec.tag == tag::LINE {
+                metadata_rows(rec, &cur_job, line, &mut rows);
+            }
+            continue;
+        }
         // Labels/units accumulate within a single LINE block, reset per record.
         let mut texts: Vec<String> = Vec::new();
 
@@ -184,6 +195,24 @@ fn is_nav_hint(s: &str) -> bool {
         }
     }
     false
+}
+
+/// Emit rows from a metadata-style LINE record (`str2` = comma-joined labels, `str3` =
+/// `;`-joined result-ids), used by screens that bind in record metadata rather than code
+/// (LCM activation lists). Each label→id pair becomes a [`Row::Text`] carrying the current
+/// feeder job (empty for pure selection screens → a static list).
+fn metadata_rows(rec: &Record, job: &JobCall, line: u16, rows: &mut Vec<Row>) {
+    if rec.str2.trim().is_empty() {
+        return;
+    }
+    let ids: Vec<&str> = rec.str3.split(';').map(str::trim).collect();
+    for (k, label) in rec.str2.split(',').map(str::trim).enumerate() {
+        if label.is_empty() {
+            continue;
+        }
+        let result = ids.get(k).copied().unwrap_or("").to_string();
+        rows.push(Row::Text { label: label.to_string(), result, job: job.clone(), line });
+    }
 }
 
 /// Build a [`Row`] from an `ergebnis*` helper call, if `name` is a recognised helper.

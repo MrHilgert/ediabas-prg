@@ -490,14 +490,20 @@ pub(super) fn activation(ui: &mut egui::Ui, c: &Colors, rows: &[Row], lang: Lang
     ui.label(RichText::new(t("activations_hint", lang)).size(11.0).color(c.fg_faint));
     ui.add_space(6.0);
     for row in rows {
-        let Row::Action { job, .. } = row else { continue };
         let label = tr_prg(row.label(), lang);
+        // Action rows are one-shot buttons (glyph + job). Metadata rows (LCM in/output list,
+        // extracted from LINE str2/str3) are selection targets — shown as a plain list with
+        // their id on the right; the actual activation is via the F-panel (F2 start / F8 select).
+        let (glyph, right) = match row {
+            Row::Action { job, .. } => ("▶", job.job.clone()),
+            _ => ("•", row.result().unwrap_or_default().to_string()),
+        };
         ui.horizontal(|ui| {
-            ui.label(RichText::new("▶").size(11.0).color(c.ok));
+            ui.label(RichText::new(glyph).size(11.0).color(c.ok));
             ui.add_space(8.0);
             ui.label(RichText::new(label).size(12.0).color(c.fg));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(&job.job).size(10.0).monospace().color(c.fg_faint));
+                ui.label(RichText::new(right).size(10.0).monospace().color(c.fg_faint));
             });
         });
     }

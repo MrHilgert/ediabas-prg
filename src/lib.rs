@@ -41,3 +41,4 @@ pub use driver::available_ports;
 pub use error::{Error, Result};
 pub use prg::{Measurement, PrgFile};
 pub use vm::Value;
+pub use vm::clear_shared_memory;

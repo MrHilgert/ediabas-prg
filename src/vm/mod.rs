@@ -32,6 +32,7 @@
 //   b0 xclose b1 xcloseex b2 xswitch b3 xsendex b4 xrecvex b5 ssize b6 tabcols b7 tabrows
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use crate::config::{CommConfig, Protocol};
 use crate::transport::Transport;
@@ -53,6 +54,41 @@ pub type ResultSet = HashMap<String, Value>;
 const REG_L0: u8 = 0x18;
 const REG_L1: u8 = 0x19;
 const REG_S1: u8 = 0x1d;
+
+/// EDIABAS **shared memory** — the backing store of the `shmset`/`shmget` opcodes. In EDIABAS
+/// this is a *process-global* `Dictionary<string, byte[]>` (EdiabasLib `SharedDataDict`,
+/// `static`): a job stores a byte buffer under a string key, and any later job — including one
+/// in a different SGBD loaded afterwards — reads it back. BMW leans on it to hand an ECU's
+/// identification/state from a master's `INITIALISIERUNG` to the variant's data jobs: the E39
+/// LWR (headlight range, reached only through the LCM master) caches its state here, and every
+/// LWR job gates on it, sending no telegram until it is present. A per-`Vm` store would drop
+/// that cross-job handoff, so this mirrors EDIABAS and lives for the process.
+/// [`clear_shared_memory`] wipes it at the start of a fresh connect so one ECU's slot cannot
+/// leak into the next.
+fn shared_mem() -> &'static Mutex<HashMap<String, Vec<u8>>> {
+    static SHM: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+    SHM.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Store `data` under `key`. Keys are case-insensitive (EDIABAS uppercases them).
+pub(crate) fn shm_set(key: &str, data: Vec<u8>) {
+    if let Ok(mut m) = shared_mem().lock() {
+        m.insert(key.to_ascii_uppercase(), data);
+    }
+}
+
+/// Fetch the bytes stored under `key`, or `None` when the slot is empty.
+pub(crate) fn shm_get(key: &str) -> Option<Vec<u8>> {
+    shared_mem().lock().ok()?.get(&key.to_ascii_uppercase()).cloned()
+}
+
+/// Drop every shared-memory slot. Call when entering a new diagnostic context (a fresh
+/// connect) so a previous ECU's cached state can't be misread by the next one.
+pub fn clear_shared_memory() {
+    if let Ok(mut m) = shared_mem().lock() {
+        m.clear();
+    }
+}
 
 #[derive(Default, Clone)]
 struct Flags {
@@ -1883,9 +1919,47 @@ impl Vm {
                     ip += 2 + l0 + nibble_size(lo, code, ip + 2 + l0);
                 }
 
-                // ── shared memory (no-op) ─────────────────────────────────────
-                [0x93, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // shmset
-                [0x94, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // shmget
+                // ── shared memory (EdiabasLib OpShmset/OpShmget) ──────────────
+                // shmset (0x93): `[93][mode][key str][data]` — SharedMem[key] := data. The
+                // write half of the master→variant state handoff; persists across jobs/SGBDs.
+                [0x93, ..] if ip + 1 < code.len() => {
+                    let mode = code[ip + 1];
+                    let (hi, lo) = (mode >> 4, mode & 0xf);
+                    let (key, data_pos) = read_str_at(&self.regs, hi, code, ip + 2);
+                    let data = match lo {
+                        1..=4 => self.reg_bytes(&code.get(data_pos).copied().unwrap_or(0)),
+                        8 => unlat(&read_str_at(&self.regs, lo, code, data_pos).0),
+                        5..=7 => {
+                            let v = read_imm_u32(code, data_pos, lo);
+                            v.to_le_bytes()[..nib_width(lo)].to_vec()
+                        }
+                        _ => Vec::new(),
+                    };
+                    shm_set(&key, data);
+                    ip = skip_instr(code, ip);
+                }
+                // shmget (0x94): `[94][mode][dst reg][key str]` — dst := SharedMem[key]. Sets
+                // Carry on a MISS (empty slot), exactly what BMW jobs branch on to tell
+                // "state cached / ECU identified" from "not yet". A no-op left the register
+                // stale and Carry untouched, so LWR read SB=0 and bailed with ERROR_LM.
+                [0x94, ..] if ip + 1 < code.len() => {
+                    let mode = code[ip + 1];
+                    let (hi, lo) = (mode >> 4, mode & 0xf);
+                    let dst = code.get(ip + 2).copied().unwrap_or(0);
+                    let key_pos = ip + 2 + nibble_size(hi, code, ip + 2);
+                    let (key, _) = read_str_at(&self.regs, lo, code, key_pos);
+                    match shm_get(&key) {
+                        Some(bytes) => {
+                            self.flags.carry = false;
+                            self.regs.insert(dst, Value::Data(bytes));
+                        }
+                        None => {
+                            self.flags.carry = true;
+                            self.regs.insert(dst, Value::Data(Vec::new()));
+                        }
+                    }
+                    ip = skip_instr(code, ip);
+                }
 
                 // ── config (no-op) ────────────────────────────────────────────
                 [0x89, ..] if ip + 1 < code.len() => { ip = skip_instr(code, ip); } // cfgig
@@ -2293,5 +2367,40 @@ mod presence_tests {
         assert!(!vm.got_response());
         assert!(!vm.responded_from(0xB8));
         assert!(vm.last_response_at().is_none());
+    }
+
+    #[test]
+    fn shm_store_roundtrips_and_is_case_insensitive_and_clears() {
+        // Distinct key so this can't race parallel tests through the global store.
+        shm_set("ShmApiKey", vec![0x01, 0x02]);
+        assert_eq!(shm_get("SHMAPIKEY"), Some(vec![0x01, 0x02])); // keys are case-folded
+        assert_eq!(shm_get("shmapikey"), Some(vec![0x01, 0x02]));
+        clear_shared_memory();
+        assert_eq!(shm_get("ShmApiKey"), None);
+    }
+
+    #[test]
+    fn shmset_then_shmget_populates_register_and_clears_carry() {
+        // shmset key="SHM1" data=[AA,BB,CC]:  93 88 <immstr key> <immstr data>
+        // shmget dst=S4(0x20) key="SHM1":     94 18 20 <immstr key>
+        let code = [
+            0x93, 0x88, 0x04, 0x00, 0x53, 0x48, 0x4D, 0x31, // shmset, key "SHM1"
+            0x03, 0x00, 0xAA, 0xBB, 0xCC,                   // data [AA,BB,CC]
+            0x94, 0x18, 0x20, 0x04, 0x00, 0x53, 0x48, 0x4D, 0x31, // shmget → S4
+        ];
+        let mut vm = vm_with(Vec::new(), Protocol::Ds2);
+        vm.run_job(&code).unwrap();
+        assert_eq!(vm.reg_bytes(&0x20), vec![0xAA, 0xBB, 0xCC], "dst gets the stored buffer");
+        assert!(!vm.flags.carry, "hit clears Carry");
+    }
+
+    #[test]
+    fn shmget_miss_sets_carry_and_empties_register() {
+        // shmget dst=0x21 key="MISSZ" — never stored → miss.
+        let code = [0x94, 0x18, 0x21, 0x05, 0x00, 0x4D, 0x49, 0x53, 0x53, 0x5A];
+        let mut vm = vm_with(Vec::new(), Protocol::Ds2);
+        vm.run_job(&code).unwrap();
+        assert!(vm.reg_bytes(&0x21).is_empty(), "miss leaves an empty buffer, not stale data");
+        assert!(vm.flags.carry, "miss sets Carry — the branch BMW jobs take when not identified");
     }
 }

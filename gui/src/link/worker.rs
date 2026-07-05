@@ -306,6 +306,10 @@ struct Candidate {
 fn connect(port: &str, script: &str) -> Result<(Session, ScreenModule), ConnReason> {
     let sm = load_ipo(script)
         .ok_or_else(|| ConnReason::Other(format!("не удалось разобрать .ipo для {script}")))?;
+    // Свежий диагностический контекст: сбрасываем EDIABAS shared memory (shmset/shmget), чтобы
+    // кэш состояния прошлого ЭБУ не «протёк» в этот коннект. Внутри одного коннекта слот пишет
+    // INITIALISIERUNG варианта и читают его же джобы (так LWR отдаёт данные через мастер-LCM).
+    ediabas::clear_shared_memory();
     let port = resolve_port(port);
     let candidates = collect_candidates(&port, &sm);
 
